@@ -50,7 +50,7 @@
 
 ### Key Entities
 
-List People, organizations, and magical artifacts mentioned. For each:
+List People, organizations,countries, Geography and Regions,  magical artifacts, monsters,gods,tools, buildings,goods and things mentioned. For each:
 
 - Name and type
 - Role in the source (central vs. peripheral)

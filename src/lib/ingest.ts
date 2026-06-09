@@ -910,6 +910,8 @@ async function autoIngestImpl(
           `Now emit the FILE blocks for the wiki files derived from **${sourceIdentity}**.`,
           "Your response MUST begin with `---FILE:` as the very first characters.",
           "No preamble. No analysis prose. Start immediately.",
+          "Do NOT generate summary/index/overview pages — they are handled by Step 1.5.",
+          "Only generate entity and concept pages.",
         ].join("\n"),
       },
     ],
