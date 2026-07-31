@@ -1,0 +1,43 @@
+[2m
+📦 Repomix v1.16.0
+[22m
+[2mNo custom config found at repomix.config.ts, repomix.config.mts, repomix.config.cts, repomix.config.js, repomix.config.mjs, repomix.config.cjs, repomix.config.json5, repomix.config.jsonc, repomix.config.json or global config at C:\Users\admin\AppData\Local\Repomix\repomix.config.ts, C:\Users\admin\AppData\Local\Repomix\repomix.config.mts, C:\Users\admin\AppData\Local\Repomix\repomix.config.cts, C:\Users\admin\AppData\Local\Repomix\repomix.config.js, C:\Users\admin\AppData\Local\Repomix\repomix.config.mjs, C:\Users\admin\AppData\Local\Repomix\repomix.config.cjs, C:\Users\admin\AppData\Local\Repomix\repomix.config.json5, C:\Users\admin\AppData\Local\Repomix\repomix.config.jsonc, C:\Users\admin\AppData\Local\Repomix\repomix.config.json.
+You can add a config file for additional settings. Please check https://github.com/yamadashy/repomix for more information.[22m
+[K[?25l⠋ Initializing...
+[K[1A[K[?25l⠙ Searching for files...
+[K[1A[K[?25l⠹ Searching for files...
+[K[1A[K[?25l⠸ Searching for files...
+[K[1A[K[?25l⠼ Collect file... (149/193) [2msrc/lib/sources-merge.ts[22m
+[K[1A[K[?25l⠴ Processing file... (192/192) [2msrc/vite-env.d.ts[22m
+[K[1A[K[?25l⠦ Processing file... (192/192) [2msrc/vite-env.d.ts[22m
+[K[1A[K[?25l⠧ Processing file... (192/192) [2msrc/vite-env.d.ts[22m
+[K[1A[K[?25l⠇ Running security check... (142/192) [2msrc/vite-env.d.ts[22m
+[K[1A[K[?25l⠏ Running security check... (192/192) [2msrc/lib/sources-merge.ts[22m
+[K[1A[K[?25l⠋ Writing output file...
+[K[1A[K[?25l✔ Packing completed successfully!
+[?25h
+📈 Top 5 Files by Token Count:
+[2m──────────────────────────────[22m
+1.  src/test-helpers/real-content.ts [2m(18,584 tokens, 70,797 chars, 4%)[22m
+2.  src/lib/ingest/pipeline.ts [2m(16,493 tokens, 67,970 chars, 3.6%)[22m
+3.  src/components/graph/graph-view.tsx [2m(16,419 tokens, 71,939 chars, 3.6%)[22m
+4.  src/lib/chat-agent.ts [2m(16,379 tokens, 68,000 chars, 3.6%)[22m
+5.  src/components/chat/chat-message.tsx [2m(11,323 tokens, 46,864 chars, 2.5%)[22m
+
+🔎 Security Check:
+[2m──────────────────[22m
+[32m✔[39m No suspicious files detected.
+
+
+📊 Pack Summary:
+[2m────────────────[22m
+  Total Files: 192 files
+ Total Tokens: 459,169 tokens
+  Total Chars: 1,863,060 chars
+       Output: repomix-output.xml
+     Security: ✔ No suspicious files detected
+
+[32m🎉 All Done![39m
+Your repository has been successfully packed.
+
+💡 Repomix is now available in your browser! Try it at [4mhttps://repomix.com[24m
