@@ -14,7 +14,7 @@ import type { LlmConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { parseWithMineruResult } from "@/lib/mineru"
 import { useChatStore } from "@/stores/chat-store"
-import { useActivityStore } from "@/stores/activity-store"
+import { useActivityStore, type ActivityItem } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import {
@@ -999,21 +999,21 @@ async function autoIngestImpl(
   // A silent `return []` here would look like success to the queue
   // runner and cause the task to be filter()'d out. Throw instead so
   // processNext's catch-block path (retry / mark failed) engages.
-  const analysisActivity = useActivityStore.getState().items.find((i) => i.id === activityId)
+  const analysisActivity = useActivityStore.getState().items.find((i: ActivityItem) => i.id === activityId)
   if (analysisActivity?.status === "error") {
     throw new Error(analysisActivity.detail || "Analysis stream failed")
   }
 
-  // ── Step 2: Generation ────────────────────────────────────────
+// ── Step 1.5: Generation ────────────────────────────────────────
   // LLM takes the analysis as context and produces wiki files + review items
-  activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
+  activity.updateItem(activityId, { detail: "Step 1.5/2: Generating summary pages..." })
 
   let generation = ""
 
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
+      { role: "system", content: buildSummaryPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
       {
         role: "user",
         content: [
@@ -1054,7 +1054,57 @@ async function autoIngestImpl(
     },
   )
 
-  const generationActivity = useActivityStore.getState().items.find((i) => i.id === activityId)
+  // ── Step 2: Generation ────────────────────────────────────────
+  // LLM takes the analysis as context and produces wiki files + review items
+  activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
+
+  await streamChat(
+    llmConfig,
+    [
+      { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext) },
+      {
+        role: "user",
+        content: [
+          `Source document to process: **${sourceIdentity}**`,
+          "",
+          "The Stage 1 analysis below is CONTEXT to inform your output. Do NOT echo",
+          "its tables, bullet points, or prose. Your output must be FILE/REVIEW",
+          "blocks as specified in the system prompt — nothing else.",
+          "",
+          "## Stage 1 Analysis (context only — do not repeat)",
+          "",
+          analysis,
+          "",
+          "## Source Context",
+          "",
+          sourceContext,
+          "",
+          "---",
+          "",
+          `Now emit the FILE blocks for the wiki files derived from **${sourceIdentity}**.`,
+          "Your response MUST begin with `---FILE:` as the very first characters.",
+          "No preamble. No analysis prose. Start immediately.",
+          "Do NOT generate summary/index/overview pages — they are handled by Step 1.5.",
+          "Only generate entity and concept pages.",
+        ].join("\n"),
+      },
+    ],
+    {
+      onToken: (token) => { generation += token },
+      onDone: () => {},
+      onError: (err) => {
+        activity.updateItem(activityId, { status: "error", detail: `Generation failed: ${err.message}` })
+      },
+    },
+    signal,
+    {
+      temperature: 0.1,
+      reasoning: { mode: "off" },
+      max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
+    },
+  )
+
+  const generationActivity = useActivityStore.getState().items.find((i: ActivityItem) => i.id === activityId)
   if (generationActivity?.status === "error") {
     throw new Error(generationActivity.detail || "Generation stream failed")
   }
@@ -2077,56 +2127,20 @@ export function buildAnalysisPrompt(
     "",
     languageRule(sourceContent),
     "",
-    "Your analysis should cover:",
-    "",
-    "## Key Entities",
-    "List people, organizations, products, datasets, tools mentioned. For each:",
-    "- Name and type",
-    "- Role in the source (central vs. peripheral)",
-    "- Whether it likely already exists in the wiki (check the index)",
-    "",
-    "## Key Concepts",
-    "List theories, methods, techniques, phenomena. For each:",
-    "- Name and brief definition",
-    "- Why it matters in this source",
-    "- Whether it likely already exists in the wiki",
-    "",
-    "## Main Arguments & Findings",
-    "- What are the core claims or results?",
-    "- What evidence supports them?",
-    "- How strong is the evidence?",
-    "- Which named subject is each claim about? Do not transfer claims, limits, or evaluations from one entity/model/product/method to another just because they share keywords.",
-    "",
-    "## Connections to Existing Wiki",
-    "- What existing pages does this source relate to?",
-    "- Does it strengthen, challenge, or extend existing knowledge?",
-    "",
-    "## Contradictions & Tensions",
-    "- Does anything in this source conflict with existing wiki content?",
-    "- Are there internal tensions or caveats?",
-    "",
-    "## Recommendations",
-    "- What wiki pages should be created or updated?",
-    "- If the project schema (below) defines page types beyond entity/concept (e.g. goal, habit, reflection, finding, decision, meeting), and the source genuinely contains matching content, recommend pages of those types — name the type explicitly. Only when the source actually supports it; never invent goals/habits/journal entries that aren't in the source.",
-    "- What should be emphasized vs. de-emphasized?",
-    "- Any open questions worth flagging for the user?",
-    "",
+    `The analysis structure is defined by the project's purpose.md. Follow the sections and priorities specified in the Wiki Purpose section below.`,
     "Be thorough but concise. Focus on what's genuinely important.",
     "",
     "If a folder context is provided, use it as a hint for categorization — the folder structure often reflects the user's organizational intent (e.g., 'papers/energy' suggests the file is an energy-related paper).",
     "",
-    schema
-      ? `## Project Schema (page types available — map source content to schema-defined types when it fits)\n${schema}`
-      : "",
     purpose ? `## Wiki Purpose (for context)\n${purpose}` : "",
     index ? `## Current Wiki Index (for checking existing content)\n${index}` : "",
   ].filter(Boolean).join("\n")
 }
 
 /**
- * Step 2 prompt: AI takes its own analysis and generates wiki files + review items.
+ * Step 1.5 prompt: AI takes its own analysis and generates wiki files + review items.
  */
-export function buildGenerationPrompt(
+export function buildSummaryPrompt(
   schema: string,
   purpose: string,
   index: string,
@@ -2166,10 +2180,177 @@ export function buildGenerationPrompt(
     "## What to generate",
     "",
     `1. A source summary page at **${summaryPath}** (MUST use this exact path)`,
-    "2. Entity or schema-defined typed pages for key named things identified in the analysis. Prefer schema-defined directories when present; otherwise use wiki/entities/.",
-    "3. Concept or schema-defined typed pages for key ideas, methods, techniques, and abstractions. Prefer schema-defined directories when present; otherwise use wiki/concepts/.",
-    "4. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
-    "Do not generate wiki/index.md or wiki/overview.md. The application maintains aggregate navigation separately so large wikis are never rewritten through model output.",
+    "2. An updated wiki/index.md — add new entries to existing categories, preserve all existing entries",
+    "3. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
+    "4. An updated wiki/overview.md — a high-level summary of what the entire wiki covers, updated to reflect the newly ingested source. This should be a comprehensive 2-5 paragraph overview of ALL topics in the wiki, not just the new source.",
+    "",
+    "## Main Arguments & Findings",
+    "- What are the core claims or results?",
+    "- What evidence supports them?",
+    "- How strong is the evidence?",
+    "- Which named subject is each claim about? Do not transfer claims, limits, or evaluations from one entity/model/product/method to another just because they share keywords.",
+    "## Frontmatter Rules (CRITICAL — parser is strict)",
+    "",
+    "Every page begins with a YAML frontmatter block. Format rules, in order of importance:",
+    "",
+    "1. The VERY FIRST line of the file MUST be exactly `---` (three hyphens, nothing else).",
+    "   Do NOT wrap the file in a ```yaml ... ``` code fence.",
+    "   Do NOT prefix it with a `frontmatter:` key or any other line.",
+    "2. Each frontmatter line is a `key: value` pair on its own line.",
+    "3. The frontmatter ends with another `---` line on its own.",
+    "4. The next line after the closing `---` is the start of the page body.",
+    "5. Arrays use the standard YAML inline form `[a, b, c]` (no outer brackets around each item).",
+    "   Wikilinks belong in the BODY only — never write `related: [[a]], [[b]]` (invalid YAML);",
+    "   write `related: [a, b]` with bare slugs.",
+    "",
+    "Required fields and types:",
+    `  • type     — one of the known types (${GENERATION_WIKI_TYPES.join(" | ")}), or a custom type explicitly defined by the project schema`,
+    "  • title    — string (quote it if it contains a colon, e.g. `title: \"Foo: Bar\"`)",
+    `  • created  — ${today} for new pages (YYYY-MM-DD, no quotes)`,
+    `  • updated  — ${today} for new pages (same as created)`,
+    "  • tags     — array of bare strings: `tags: [microbiology, ai]`",
+    "  • related  — array of bare wiki page slugs: `related: [foo, bar-baz]`. Do NOT include",
+    "               `wiki/`, `.md`, or `[[…]]` here — slugs only.",
+    `  • sources  — array of source filenames; MUST include "${sourceFileName}".`,
+    "",
+    "Concrete example of a complete, parseable page (everything between the two `---` lines",
+    "is the frontmatter; the heading and prose below are the body):",
+    "",
+    "    ---",
+    "    type: entity",
+    "    title: Example Entity",
+    `    created: ${today}`,
+    `    updated: ${today}`,
+    "    tags: [example, demo]",
+    "    related: [related-slug-1, related-slug-2]",
+    `    sources: ["${sourceFileName}"]`,
+    "    ---",
+    "",
+    "    # Example Entity",
+    "",
+    "    Body content goes here. Use [[wikilink]] syntax in the body for cross-references.",
+    "",
+    "Other rules:",
+    "- Use [[wikilink]] syntax in the BODY for cross-references between pages",
+    "- If you include images, use wiki-root-relative paths such as `media/source-slug/image.png`; never output absolute filesystem paths.",
+    "- Use kebab-case filenames",
+    "- Derive filenames from the page title in the mandatory output language. For Chinese/Japanese/Korean titles, keep readable CJK characters in the filename instead of translating the slug to English.",
+    "- Follow the analysis recommendations on what to emphasize",
+    "- If the analysis found connections to existing pages, add cross-references",
+    "",
+    "## Review block types",
+    "",
+    "After all FILE blocks, optionally emit REVIEW blocks for anything that needs human judgment:",
+    "",
+    "- contradiction: the analysis found conflicts with existing wiki content",
+    "- duplicate: an entity/concept might already exist under a different name in the index",
+    "- missing-page: an important concept is referenced but has no dedicated page",
+    "- suggestion: ideas for further research, related sources to look for, or connections worth exploring",
+    "",
+    "Only create reviews for things that genuinely need human input. Don't create trivial reviews.",
+    "",
+    "## OPTIONS allowed values (only these predefined labels):",
+    "",
+    "- contradiction: OPTIONS: Create Page | Skip",
+    "- duplicate: OPTIONS: Create Page | Skip",
+    "- missing-page: OPTIONS: Create Page | Skip",
+    "- suggestion: OPTIONS: Create Page | Skip",
+    "",
+    "The user also has a 'Deep Research' button (auto-added by the system) that triggers web search.",
+    "Do NOT invent custom option labels. Only use 'Create Page' and 'Skip'.",
+    "",
+    "For suggestion and missing-page reviews, the SEARCH field must contain 2-3 web search queries",
+    "(keyword-rich, specific, suitable for a search engine — NOT titles or sentences). Example:",
+    "  SEARCH: automated technical debt detection AI generated code | software quality metrics LLM code generation | static analysis tools agentic software development",
+    "",
+    purpose ? `## Wiki Purpose\n${purpose}` : "",
+    index ? `## Current Wiki Index (preserve all existing entries, add new ones)\n${index}` : "",
+    overview ? `## Current Overview (update this to reflect the new source)\n${overview}` : "",
+    "",
+    // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
+    "## Output Format (MUST FOLLOW EXACTLY — this is how the parser reads your response)",
+    "",
+    "Your ENTIRE response consists of FILE blocks followed by optional REVIEW blocks. Nothing else.",
+    "",
+    "FILE block template:",
+    "```",
+    "---FILE: wiki/path/to/page.md---",
+    "(complete file content with YAML frontmatter)",
+    "---END FILE---",
+    "```",
+    "",
+    "REVIEW block template (optional, after all FILE blocks):",
+    "```",
+    "---REVIEW: type | Title---",
+    "Description of what needs the user's attention.",
+    "OPTIONS: Create Page | Skip",
+    "PAGES: wiki/page1.md, wiki/page2.md",
+    "SEARCH: query 1 | query 2 | query 3",
+    "---END REVIEW---",
+    "```",
+    "",
+    "## Output Requirements (STRICT — deviations will cause parse failure)",
+    "",
+    "1. The FIRST character of your response MUST be `-` (the opening of `---FILE:`).",
+    "2. DO NOT output any preamble such as \"Here are the files:\", \"Based on the analysis...\", or any introductory prose.",
+    "3. DO NOT echo or restate the analysis — that was stage 1's job. Your job is to emit FILE blocks.",
+    "4. DO NOT output markdown tables, bullet lists, or headings outside of FILE/REVIEW blocks.",
+    "5. DO NOT output any trailing commentary after the last `---END FILE---` or `---END REVIEW---`.",
+    "6. Between blocks, use only blank lines — no prose.",
+    "7. EVERY FILE block's content (titles, body, descriptions) MUST be in the mandatory output language specified below. No exceptions — not even for page names or section headings.",
+    "",
+    "If you start with anything other than `---FILE:`, the entire response will be discarded.",
+    "",
+    // Repeat the language directive at the very end so it wins the "most
+    // recent instruction" tie-breaker. Small-to-medium models otherwise
+    // drift back to their training-data language for individual pages.
+    "---",
+    "",
+    languageRule(sourceContent),
+  ].filter(Boolean).join("\n")
+}
+
+/**
+ * Step 2 prompt: AI takes its own analysis and generates wiki files + review items.
+ */
+export function buildGenerationPrompt(
+  schema: string,
+  purpose: string,
+  index: string,
+  sourceFileName: string,
+  overview?: string,
+  sourceContent: string = "",
+): string {
+  // Use original filename (without extension) as the source summary page name
+  const today = currentWikiDate()
+
+  return [
+    "You are a wiki maintainer. Based on the analysis provided, generate wiki files.",
+    "Do not output chain-of-thought, hidden reasoning, or explanatory preamble. Reason internally and output only the requested FILE/REVIEW blocks.",
+    "",
+    languageRule(sourceContent),
+    "",
+    `## IMPORTANT: Source File`,
+    `The original source file is: **${sourceFileName}**`,
+    `All wiki pages generated from this source MUST include this filename in their frontmatter \`sources\` field.`,
+    `Today's date is **${today}**. Use this exact date for all new \`created\`, \`updated\`, and wiki/log.md ingest dates.`,
+    "",
+    schema
+      ? [
+          "## Project Schema and Routing (AUTHORITATIVE)",
+          schema,
+          "",
+          "Use this schema as the primary routing rule for page types and directories.",
+          "If it defines custom folders or distinctions (for example people, technologies, organizations, methods, or cases), write pages into those schema-defined folders instead of forcing them into wiki/entities/ or wiki/concepts/.",
+          "Use wiki/entities/ and wiki/concepts/ only when the schema does not provide a more specific destination.",
+          "Every generated page's frontmatter type must match the schema directory used in its FILE path.",
+        ].join("\n")
+      : "",
+    "",
+    "## What to generate",
+    "",
+    "1. Entity or schema-defined typed pages for key named things identified in the analysis. Prefer schema-defined directories when present; otherwise use wiki/entities/.",
+    "2. Concept or schema-defined typed pages for key ideas, methods, techniques, and abstractions. Prefer schema-defined directories when present; otherwise use wiki/concepts/.",
     "",
     "## Frontmatter Rules (CRITICAL — parser is strict)",
     "",
