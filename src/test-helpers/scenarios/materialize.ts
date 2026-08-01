@@ -22,7 +22,11 @@ type AnyScenario = {
   pageToEnrich?: string
   source?: { path: string; content: string }
   analysisResponse?: string
-  generationResponse?: string
+  entityResponse?: string
+  conceptResponse?: string
+  summaryResponse?: string
+  aggregateResponse?: string
+  reviewResponse?: string
   query?: string
 }
 
@@ -71,7 +75,9 @@ export async function materializeScenario(
     )
   }
 
-  // Ingest scenarios emit TWO LLM responses (stage 1 analysis + stage 2 generation).
+  // Ingest scenarios emit one raw LLM response per pipeline stage, in the
+  // order the pipeline calls streamChat (analysis, entity, concept, summary,
+  // aggregate, optional review).
   if (scenario.analysisResponse !== undefined) {
     await fs.writeFile(
       path.join(scenarioPath, "llm-analysis.txt"),
@@ -79,10 +85,38 @@ export async function materializeScenario(
       "utf-8",
     )
   }
-  if (scenario.generationResponse !== undefined) {
+  if (scenario.entityResponse !== undefined) {
     await fs.writeFile(
-      path.join(scenarioPath, "llm-generation.txt"),
-      scenario.generationResponse,
+      path.join(scenarioPath, "llm-entity.txt"),
+      scenario.entityResponse,
+      "utf-8",
+    )
+  }
+  if (scenario.conceptResponse !== undefined) {
+    await fs.writeFile(
+      path.join(scenarioPath, "llm-concept.txt"),
+      scenario.conceptResponse,
+      "utf-8",
+    )
+  }
+  if (scenario.summaryResponse !== undefined) {
+    await fs.writeFile(
+      path.join(scenarioPath, "llm-summary.txt"),
+      scenario.summaryResponse,
+      "utf-8",
+    )
+  }
+  if (scenario.aggregateResponse !== undefined) {
+    await fs.writeFile(
+      path.join(scenarioPath, "llm-aggregate.txt"),
+      scenario.aggregateResponse,
+      "utf-8",
+    )
+  }
+  if (scenario.reviewResponse !== undefined) {
+    await fs.writeFile(
+      path.join(scenarioPath, "llm-review.txt"),
+      scenario.reviewResponse,
       "utf-8",
     )
   }

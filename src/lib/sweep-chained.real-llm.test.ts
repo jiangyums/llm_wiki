@@ -22,7 +22,7 @@ import { realFs, createTempProject } from "@/test-helpers/fs-temp"
 
 vi.mock("@/commands/fs", () => realFs)
 
-import { autoIngest } from "./ingest"
+import { autoIngest } from "./ingest/index"
 import { sweepResolvedReviews } from "./sweep-reviews"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"

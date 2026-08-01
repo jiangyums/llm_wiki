@@ -78,6 +78,25 @@ export const realFs = {
   findRelatedWikiPages: async (): Promise<string[]> => {
     return []
   },
+  readFileAsBase64: async (p: string): Promise<{ base64: string; mimeType: string }> => {
+    const buf = await fs.readFile(p)
+    const mimeTypes: Record<string, string> = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+      ".pdf": "application/pdf",
+      ".md": "text/markdown",
+      ".txt": "text/plain",
+      ".yaml": "text/yaml",
+      ".yml": "text/yaml",
+    }
+    return {
+      base64: buf.toString("base64"),
+      mimeType: mimeTypes[path.extname(p).toLowerCase()] ?? "application/octet-stream",
+    }
+  },
   createDirectory: async (p: string): Promise<void> => {
     await fs.mkdir(p, { recursive: true })
   },

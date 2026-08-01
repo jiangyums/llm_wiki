@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest"
 import { flushMicrotasks } from "@/test-helpers/deferred"
 
 // Mock autoIngest so tests control success/failure timing.
-vi.mock("./ingest", () => ({
+vi.mock("./ingest/index", () => ({
   autoIngest: vi.fn(),
 }))
 
@@ -67,7 +67,7 @@ import {
   resumeProcessing,
   isQueuePaused,
 } from "./ingest-queue"
-import { autoIngest } from "./ingest"
+import { autoIngest } from "./ingest/index"
 import { readFile, writeFile } from "@/commands/fs"
 import { sweepResolvedReviews } from "./sweep-reviews"
 import { useWikiStore } from "@/stores/wiki-store"

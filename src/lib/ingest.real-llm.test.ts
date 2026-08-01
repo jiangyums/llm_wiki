@@ -19,7 +19,7 @@ import { realFs, createTempProject, readFileRaw, fileExists } from "@/test-helpe
 
 vi.mock("@/commands/fs", () => realFs)
 
-import { autoIngest } from "./ingest"
+import { autoIngest } from "./ingest/index"
 import { runStructuralLint } from "./lint"
 import { useWikiStore, type OutputLanguage } from "@/stores/wiki-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"

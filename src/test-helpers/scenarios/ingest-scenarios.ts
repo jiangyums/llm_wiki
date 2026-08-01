@@ -1,23 +1,27 @@
 import type { IngestScenario } from "./types"
 
 /**
- * Ingest scenarios drive autoIngest end-to-end. Two LLM responses per
- * scenario (stage 1 analysis, stage 2 generation with FILE + REVIEW blocks).
+ * Ingest scenarios drive autoIngest end-to-end through the new multi-stage
+ * pipeline. Each scenario provides one raw LLM response per stage, consumed
+ * in pipeline order: analysis → entity → concept → summary → aggregate →
+ * optional review.
  *
- * FILE block format (what stage 2 must emit to write a wiki file):
+ * FILE block format (what each generation stage emits to write a wiki file):
  *   ---FILE: wiki/path/to/page.md---
  *   (file content, usually with YAML frontmatter)
  *   ---END FILE---
  *
- * REVIEW block format (what stage 2 emits to inject a review item):
+ * REVIEW block format (carried in entity/concept output, or from the
+ * dedicated review stage):
  *   ---REVIEW: missing-page | Short title---
  *   Description.
  *   OPTIONS: Approve | Skip
  *   PAGES: page1.md, page2.md
  *   ---END REVIEW---
  *
- * Stage 2 may emit arbitrary prose around blocks — the parser only
- * cares about the delimited blocks.
+ * The analysis stage MUST wrap its manifest in a FILE block at
+ * `wiki/.manifest` listing entity/concept slugs. The aggregate stage MUST
+ * emit `---FILE: wiki/overview.md---`. Both are hard requirements.
  */
 
 const BASIC_PURPOSE = `# Purpose
@@ -45,7 +49,7 @@ export const ingestScenarios: IngestScenario[] = [
   {
     name: "basic-new-source",
     description:
-      "Stage 2 emits a single concept page + a source summary page. No " +
+      "Pipeline generates a concept page + a source summary page. No " +
       "REVIEW blocks. The runner must see both files on disk and zero " +
       "reviews in the store.",
     initialWiki: {
@@ -70,13 +74,22 @@ export const ingestScenarios: IngestScenario[] = [
       "## Main Arguments",
       "- RoPE naturally supports variable-length contexts",
       "",
-      "## Recommendations",
-      "- Create wiki/concepts/rope.md",
-      "- Create wiki/sources/rope-paper.md",
+      "---FILE: wiki/.manifest---",
+      "**concept**: `rope` - Rotary Position Embedding",
+      "---END FILE---",
     ].join("\n"),
-    generationResponse: [
-      "I'll create one concept page and the source summary.",
+    entityResponse: [
+      "---FILE: wiki/entities/rope-method.md---",
+      "---",
+      "title: RoPE Method",
+      "---",
       "",
+      "# RoPE Method",
+      "",
+      "Positional-encoding technique introduced in the rope-paper source.",
+      "---END FILE---",
+    ].join("\n"),
+    conceptResponse: [
       "---FILE: wiki/concepts/rope.md---",
       "---",
       "title: Rotary Position Embedding",
@@ -89,16 +102,28 @@ export const ingestScenarios: IngestScenario[] = [
       "RoPE rotates pairs of dimensions in [[attention]] queries and keys",
       "to encode absolute position while preserving relative-position invariance.",
       "---END FILE---",
-      "",
+    ].join("\n"),
+    summaryResponse: [
       "---FILE: wiki/sources/rope-paper.md---",
       "---",
-      "title: \"Source: rope-paper.md\"",
+      'title: "Source: rope-paper.md"',
       "sources: [rope-paper.md]",
       "---",
       "",
       "# Source: rope-paper.md",
       "",
       "Paper introducing [[Rotary Position Embedding]].",
+      "---END FILE---",
+    ].join("\n"),
+    aggregateResponse: [
+      "---FILE: wiki/overview.md---",
+      "---",
+      'title: "Overview"',
+      "---",
+      "",
+      "# Overview",
+      "",
+      "RoPE is the positional-encoding approach covered by this project.",
       "---END FILE---",
     ].join("\n"),
     expected: {
@@ -121,7 +146,7 @@ export const ingestScenarios: IngestScenario[] = [
   {
     name: "generates-review-items",
     description:
-      "Stage 2 emits one FILE and two REVIEW blocks (missing-page + " +
+      "Entity output carries one FILE and two REVIEW blocks (missing-page + " +
       "suggestion). Both reviews must appear in the store after ingest.",
     initialWiki: {
       "purpose.md": BASIC_PURPOSE,
@@ -133,17 +158,23 @@ export const ingestScenarios: IngestScenario[] = [
       content:
         "# FlashAttention\n\nFlashAttention is an IO-aware exact attention algorithm.\n",
     },
-    analysisResponse: "## Key Concepts\n- FlashAttention\n",
-    generationResponse: [
-      "---FILE: wiki/sources/flash-attention.md---",
+    analysisResponse: [
+      "## Key Concepts",
+      "- FlashAttention",
+      "",
+      "---FILE: wiki/.manifest---",
+      "**concept**: `flash-attention` - FlashAttention",
+      "---END FILE---",
+    ].join("\n"),
+    entityResponse: [
+      "---FILE: wiki/entities/flash-attention-method.md---",
       "---",
-      "title: \"Source: flash-attention.md\"",
-      "sources: [flash-attention.md]",
+      "title: FlashAttention Method",
       "---",
       "",
-      "# Source: flash-attention.md",
+      "# FlashAttention Method",
       "",
-      "FlashAttention is mentioned here.",
+      "IO-aware attention implementation from the flash-attention source.",
       "---END FILE---",
       "",
       "---REVIEW: missing-page | FlashAttention---",
@@ -155,6 +186,40 @@ export const ingestScenarios: IngestScenario[] = [
       "---REVIEW: suggestion | Add IO-aware algorithms survey---",
       "Consider a survey page grouping IO-aware attention variants.",
       "---END REVIEW---",
+    ].join("\n"),
+    conceptResponse: [
+      "---FILE: wiki/concepts/flash-attention.md---",
+      "---",
+      "title: FlashAttention",
+      "---",
+      "",
+      "# FlashAttention",
+      "",
+      "An IO-aware exact attention algorithm.",
+      "---END FILE---",
+    ].join("\n"),
+    summaryResponse: [
+      "---FILE: wiki/sources/flash-attention.md---",
+      "---",
+      'title: "Source: flash-attention.md"',
+      "sources: [flash-attention.md]",
+      "---",
+      "",
+      "# Source: flash-attention.md",
+      "",
+      "FlashAttention is mentioned here.",
+      "---END FILE---",
+    ].join("\n"),
+    aggregateResponse: [
+      "---FILE: wiki/overview.md---",
+      "---",
+      'title: "Overview"',
+      "---",
+      "",
+      "# Overview",
+      "",
+      "FlashAttention improves attention efficiency.",
+      "---END FILE---",
     ].join("\n"),
     expected: {
       writtenPaths: ["wiki/sources/flash-attention.md"],
@@ -182,10 +247,27 @@ export const ingestScenarios: IngestScenario[] = [
       path: "raw/sources/multi-head.md",
       content: "# Multi-Head Attention\n\nParallel attention heads.\n",
     },
-    analysisResponse:
-      "## Connections to Existing Wiki\n" +
-      "- Multi-head attention is a variant of attention — existing [[attention]] page should be linked.\n",
-    generationResponse: [
+    analysisResponse: [
+      "## Connections to Existing Wiki",
+      "- Multi-head attention is a variant of attention — the existing",
+      "  [[attention]] page should be linked.",
+      "",
+      "---FILE: wiki/.manifest---",
+      "**concept**: `multi-head-attention` - Multi-Head Attention",
+      "---END FILE---",
+    ].join("\n"),
+    entityResponse: [
+      "---FILE: wiki/entities/attention-head.md---",
+      "---",
+      "title: Attention Head",
+      "---",
+      "",
+      "# Attention Head",
+      "",
+      "A single parallel attention mechanism.",
+      "---END FILE---",
+    ].join("\n"),
+    conceptResponse: [
       "---FILE: wiki/concepts/multi-head-attention.md---",
       "---",
       "title: Multi-Head Attention",
@@ -195,15 +277,28 @@ export const ingestScenarios: IngestScenario[] = [
       "",
       "Multi-head [[attention]] runs several attention layers in parallel.",
       "---END FILE---",
-      "",
+    ].join("\n"),
+    summaryResponse: [
       "---FILE: wiki/sources/multi-head.md---",
       "---",
-      "title: \"Source: multi-head.md\"",
+      'title: "Source: multi-head.md"',
+      "sources: [multi-head.md]",
       "---",
       "",
       "# Source: multi-head.md",
       "",
       "Source for multi-head [[attention]].",
+      "---END FILE---",
+    ].join("\n"),
+    aggregateResponse: [
+      "---FILE: wiki/overview.md---",
+      "---",
+      'title: "Overview"',
+      "---",
+      "",
+      "# Overview",
+      "",
+      "Multi-head attention extends the attention mechanism.",
       "---END FILE---",
     ].join("\n"),
     expected: {
@@ -232,8 +327,26 @@ export const ingestScenarios: IngestScenario[] = [
       path: "raw/sources/transformer-survey.md",
       content: "# Transformer 综述\n\nTransformer 是一种基于注意力机制的神经网络架构。\n",
     },
-    analysisResponse: "## 核心概念\n- Transformer：基于注意力机制的架构\n",
-    generationResponse: [
+    analysisResponse: [
+      "## 核心概念",
+      "- Transformer：基于注意力机制的架构",
+      "",
+      "---FILE: wiki/.manifest---",
+      "**concept**: `transformer` - Transformer",
+      "---END FILE---",
+    ].join("\n"),
+    entityResponse: [
+      "---FILE: wiki/entities/transformer-architecture.md---",
+      "---",
+      "title: Transformer Architecture",
+      "---",
+      "",
+      "# Transformer Architecture",
+      "",
+      "Architecture family introduced in the transformer-survey source.",
+      "---END FILE---",
+    ].join("\n"),
+    conceptResponse: [
       "---FILE: wiki/concepts/transformer.md---",
       "---",
       "title: Transformer",
@@ -243,15 +356,28 @@ export const ingestScenarios: IngestScenario[] = [
       "",
       "Transformer 是一种基于 [[注意力机制]] 的神经网络架构。",
       "---END FILE---",
-      "",
+    ].join("\n"),
+    summaryResponse: [
       "---FILE: wiki/sources/transformer-survey.md---",
       "---",
-      "title: \"Source: transformer-survey.md\"",
+      'title: "Source: transformer-survey.md"',
+      "sources: [transformer-survey.md]",
       "---",
       "",
       "# Source: transformer-survey.md",
       "",
       "关于 [[Transformer]] 的综述。",
+      "---END FILE---",
+    ].join("\n"),
+    aggregateResponse: [
+      "---FILE: wiki/overview.md---",
+      "---",
+      'title: "Overview"',
+      "---",
+      "",
+      "# Overview",
+      "",
+      "Transformer 是当前深度学习的基础架构。",
       "---END FILE---",
     ].join("\n"),
     expected: {

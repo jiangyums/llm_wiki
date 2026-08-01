@@ -252,8 +252,6 @@ export function buildGenerationPrompt(
 }
 
 export function buildReviewSuggestionPrompt(
-  purpose: string,
-  relatedPages: string,
   sourceIdentity: string,
   analysis: string,
   sourceContext: string,
@@ -354,7 +352,6 @@ export function buildAggregatePrompt(
   maxContextSize: number | undefined,
 ): string {
   const sectionCap = aggregateRepairSectionCap(maxContextSize)
-  const today = currentWikiDate()
 
   const pageSummaries = pageContents.map((content, i) => {
     const path = writtenPaths[i]

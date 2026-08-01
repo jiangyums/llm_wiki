@@ -77,8 +77,12 @@ function isWindowsSafePathSegment(segment: string): boolean {
   if (segment.length === 0) return false
   if (/[<>:"|?*]/.test(segment)) return false
   if (/[ .]$/.test(segment)) return false
+  // Hidden dotfiles (`.manifest`, `.gitignore`, …) are legitimate ingest
+  // targets — the analysis stage emits `wiki/.manifest` as a FILE block
+  // that carries the page plan. Only the stem before the first dot is
+  // compared against reserved device names; a leading dot (empty stem) is
+  // not a device name and must pass.
   const stem = segment.split(".")[0]?.toUpperCase()
-  if (!stem) return false
   if (
     stem === "CON" ||
     stem === "PRN" ||

@@ -7,7 +7,7 @@ import {
   writeFile,
 } from "@/commands/fs"
 import type { LlmConfig, MultimodalConfig } from "@/stores/wiki-store"
-import { extractAndSaveSourceImages, extractAndSaveMarkdownImages, buildImageMarkdownSection, type SavedImage } from "@/lib/extract-source-images"
+import { extractAndSaveSourceImages, buildImageMarkdownSection, type SavedImage } from "@/lib/extract-source-images"
 import { loadCaptionCache } from "@/lib/image-caption-pipeline"
 import { useWikiStore } from "@/stores/wiki-store"
 

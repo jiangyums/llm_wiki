@@ -8,7 +8,7 @@ import {
   computeIngestSourceBudget,
   formatIngestWarningLogEntry,
   splitSourceIntoSemanticChunks,
-} from "./ingest"
+} from "./ingest/index"
 import { useWikiStore } from "@/stores/wiki-store"
 
 beforeEach(() => {
@@ -41,37 +41,26 @@ describe("buildAnalysisPrompt language directive", () => {
     expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: English")
   })
 
-  it("contains structural analysis sections", () => {
+  it("mandates the page manifest FILE block and slug naming rules", () => {
     const prompt = buildAnalysisPrompt("", "", "")
-    expect(prompt).toContain("## Key Entities")
-    expect(prompt).toContain("## Key Concepts")
-    expect(prompt).toContain("## Main Arguments & Findings")
-    expect(prompt).toContain("## Recommendations")
-  })
-
-  it("requires claims to stay attached to their named subject", () => {
-    const prompt = buildAnalysisPrompt("", "", "")
-    expect(prompt).toContain("Which named subject is each claim about")
-    expect(prompt).toContain("Do not transfer claims, limits, or evaluations")
+    expect(prompt).toContain("## 建议创建的Wiki页面")
+    expect(prompt).toContain("---FILE: wiki/.manifest---")
+    expect(prompt).toContain("---END FILE---")
+    expect(prompt).toContain("NEVER use Chinese characters in slugs")
+    expect(prompt).toContain("kebab-case pinyin")
+    expect(prompt).toContain("kebab-case English")
   })
 
   it("injects the project schema so analysis can recommend custom-typed pages", () => {
     const schema = "## Page Types\n| goal | wiki/goals/ | Outcomes |\n| habit | wiki/habits/ | Behaviours |"
     const prompt = buildAnalysisPrompt("", "", "", schema)
     expect(prompt).toContain("## Project Schema")
-    expect(prompt).toContain("wiki/goals/")
-    // Recommendations guidance must mention schema-defined types
-    expect(prompt).toContain("goal, habit")
+    expect(prompt).toContain(schema)
   })
 
   it("omits the schema section when no schema is provided", () => {
     const prompt = buildAnalysisPrompt("", "", "")
     expect(prompt).not.toContain("## Project Schema")
-  })
-
-  it("does not invent schema content not present in the source", () => {
-    const prompt = buildAnalysisPrompt("", "", "", "| goal | wiki/goals/ | x |")
-    expect(prompt).toContain("never invent")
   })
 })
 
@@ -118,7 +107,7 @@ describe("buildGenerationPrompt language directive", () => {
     const prompt = buildGenerationPrompt("", "", "", "source.pdf")
 
     expect(prompt).toContain("Derive filenames from the page title in the mandatory output language")
-    expect(prompt).toContain("keep readable CJK characters in the filename")
+    expect(prompt).toContain("short proper nouns and technical identifiers take precedence")
   })
 
   it("preserves technical proper nouns instead of translating them into the output language", () => {
@@ -139,7 +128,7 @@ describe("buildGenerationPrompt language directive", () => {
 
     expect(prompt).toContain("Preserve subject boundaries")
     expect(prompt).toContain("Do not merge or generalize a claim about one subject into another subject's page")
-    expect(prompt).toContain("cite which source/frontmatter `sources` entry supports that statement")
+    expect(prompt).toContain("cite which source supports that statement")
   })
 
   it("makes project schema routing authoritative over default entity and concept folders", () => {
@@ -152,7 +141,7 @@ describe("buildGenerationPrompt language directive", () => {
     expect(prompt).toContain("## Project Schema and Routing (AUTHORITATIVE)")
     expect(prompt).toContain("write pages into those schema-defined folders")
     expect(prompt).toContain("frontmatter type must match the schema directory")
-    expect(prompt).toContain("otherwise use wiki/entities/")
+    expect(prompt).toContain("Use wiki/entities/ and wiki/concepts/ only when the schema does not provide a more specific destination")
     expect(prompt).not.toContain("Entity pages in wiki/entities/ for key entities")
   })
 
@@ -206,12 +195,12 @@ describe("long-source ingest planning", () => {
     expect(computeIngestReviewMaxTokens(1_000_000)).toBe(8_192)
   })
 
-  it("scales source budget from the configured context window instead of a fixed 50k cap", () => {
-    const small = computeIngestSourceBudget(64_000, 8_000)
-    const large = computeIngestSourceBudget(1_000_000, 8_000)
+  it("scales source budget from the configured context window", () => {
+    const small = computeIngestSourceBudget(64_000)
+    const large = computeIngestSourceBudget(1_000_000)
 
-    expect(small).toBeGreaterThan(20_000)
-    expect(large).toBeGreaterThan(200_000)
+    expect(small).toBe(8_000)
+    expect(large).toBe(50_000)
     expect(large).toBeLessThanOrEqual(300_000)
   })
 

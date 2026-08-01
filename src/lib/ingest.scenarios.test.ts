@@ -19,6 +19,13 @@ import type { IngestScenario } from "@/test-helpers/scenarios/types"
 
 vi.mock("@/commands/fs", () => realFs)
 
+// New pipeline Stage 4 (related-page retrieval) calls searchWiki, which
+// invokes a Tauri backend command — unavailable in node test env. Scenarios
+// assert the generation contract, not embedding search, so stub it empty.
+vi.mock("@/lib/search", () => ({
+  searchWiki: vi.fn(async () => []),
+}))
+
 // Sequenced streamChat: stage-1 returns analysisResponse, stage-2 returns
 // generationResponse. Any further calls return empty (shouldn't happen in a
 // typical autoIngest run).
@@ -36,7 +43,7 @@ vi.mock("./llm-client", () => ({
   }),
 }))
 
-import { autoIngest } from "./ingest"
+import { autoIngest } from "./ingest/index"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import { useActivityStore } from "@/stores/activity-store"
@@ -104,16 +111,31 @@ async function setup(scenario: IngestScenario): Promise<Ctx> {
     maxContextSize: 128000,
   })
 
-  // Queue up the two sequenced LLM responses
-  const analysis = await fs.readFile(
-    path.join(FIXTURES_ROOT, scenario.name, "llm-analysis.txt"),
-    "utf-8",
-  )
-  const generation = await fs.readFile(
-    path.join(FIXTURES_ROOT, scenario.name, "llm-generation.txt"),
-    "utf-8",
-  )
-  pendingResponses = [analysis, generation]
+  // Queue the per-stage LLM responses in pipeline call order: analysis,
+  // entity, concept, summary, aggregate, optional review.
+  const stageFiles: Array<[keyof typeof scenario, string]> = [
+    ["analysisResponse", "llm-analysis.txt"],
+    ["entityResponse", "llm-entity.txt"],
+    ["conceptResponse", "llm-concept.txt"],
+    ["summaryResponse", "llm-summary.txt"],
+    ["aggregateResponse", "llm-aggregate.txt"],
+  ]
+  pendingResponses = []
+  for (const [, fileName] of stageFiles) {
+    const content = await fs.readFile(
+      path.join(FIXTURES_ROOT, scenario.name, fileName),
+      "utf-8",
+    )
+    pendingResponses.push(content)
+  }
+  if (scenario.reviewResponse !== undefined) {
+    pendingResponses.push(
+      await fs.readFile(
+        path.join(FIXTURES_ROOT, scenario.name, "llm-review.txt"),
+        "utf-8",
+      ),
+    )
+  }
 
   return { tmp }
 }
@@ -244,18 +266,43 @@ describe("ingest scenarios (fixture-driven)", () => {
     })
 
     pendingResponses = [
-      "analysis",
+      // Stage analysis — valid manifest so the pipeline proceeds.
       [
-        "---FILE: wiki/sources/schema-routing.md---",
+        "## Key Concepts",
+        "- Schema routing",
+        "",
+        "---FILE: wiki/.manifest---",
+        "**entity**: `route` - Route",
+        "---END FILE---",
+      ].join("\n"),
+      // Stage entity — one valid entity page.
+      [
+        "---FILE: wiki/entities/route.md---",
         "---",
-        "type: source",
-        "title: Source: schema-routing.md",
+        "type: entity",
+        "title: Route",
         "sources: [schema-routing.md]",
         "tags: []",
         "related: []",
         "---",
         "",
-        "# Source: schema-routing.md",
+        "# Route",
+        "---END FILE---",
+      ].join("\n"),
+      // Stage concept — one valid concept page plus one whose frontmatter
+      // type ("source") disagrees with the wiki/concepts/ directory routing.
+      // The latter must be dropped by schema routing validation.
+      [
+        "---FILE: wiki/concepts/right-place.md---",
+        "---",
+        "type: concept",
+        "title: Right Place",
+        "sources: [schema-routing.md]",
+        "tags: []",
+        "related: []",
+        "---",
+        "",
+        "# Right Place",
         "---END FILE---",
         "",
         "---FILE: wiki/concepts/wrong-place.md---",
@@ -268,6 +315,30 @@ describe("ingest scenarios (fixture-driven)", () => {
         "---",
         "",
         "# Wrong Place",
+        "---END FILE---",
+      ].join("\n"),
+      // Stage summary — the source summary page (path rewritten by pipeline).
+      [
+        "---FILE: wiki/sources/schema-routing.md---",
+        "---",
+        "type: source",
+        "title: Source: schema-routing.md",
+        "sources: [schema-routing.md]",
+        "tags: []",
+        "related: []",
+        "---",
+        "",
+        "# Source: schema-routing.md",
+        "---END FILE---",
+      ].join("\n"),
+      // Stage aggregate — required wiki/overview.md block.
+      [
+        "---FILE: wiki/overview.md---",
+        "---",
+        "title: Overview",
+        "---",
+        "",
+        "# Overview",
         "---END FILE---",
       ].join("\n"),
     ]
@@ -311,39 +382,83 @@ describe("ingest scenarios (fixture-driven)", () => {
       maxContextSize: 128000,
     })
 
+    const analysisFor = (label: string) =>
+      [
+        "## Key Concepts",
+        `- ${label}`,
+        "",
+        "---FILE: wiki/.manifest---",
+        `**entity**: \`${label.toLowerCase().replace(/\W+/g, "-")}\` - ${label}`,
+        "---END FILE---",
+      ].join("\n")
+    const entityFor = (slug: string, label: string) =>
+      [
+        `---FILE: wiki/entities/${slug}.md---`,
+        "---",
+        "type: entity",
+        `title: ${label}`,
+        "sources: [config.yaml]",
+        "tags: []",
+        "related: []",
+        "---",
+        "",
+        `# ${label}`,
+        "---END FILE---",
+      ].join("\n")
+    const conceptFor = (slug: string, label: string) =>
+      [
+        `---FILE: wiki/concepts/${slug}.md---`,
+        "---",
+        "type: concept",
+        `title: ${label}`,
+        "sources: [config.yaml]",
+        "tags: []",
+        "related: []",
+        "---",
+        "",
+        `# ${label}`,
+        "---END FILE---",
+      ].join("\n")
+    const summaryFor = (label: string, body: string) =>
+      [
+        "---FILE: wiki/sources/config.md---",
+        "---",
+        'type: "source"',
+        `title: "Source: config.yaml"`,
+        'sources: ["config.yaml"]',
+        "tags: []",
+        "related: []",
+        "---",
+        "",
+        `# ${label}`,
+        "",
+        body,
+        "---END FILE---",
+      ].join("\n")
+    const aggregateOverview = () =>
+      [
+        "---FILE: wiki/overview.md---",
+        "---",
+        "title: Overview",
+        "---",
+        "",
+        "# Overview",
+        "---END FILE---",
+      ].join("\n")
+
     pendingResponses = [
-      "analysis for project A",
-      [
-        "---FILE: wiki/sources/config.md---",
-        "---",
-        'type: "source"',
-        'title: "Source: config.yaml"',
-        'sources: ["config.yaml"]',
-        "tags: []",
-        "related: []",
-        "---",
-        "",
-        "# Project A",
-        "",
-        "analysis for project A",
-        "---END FILE---",
-      ].join("\n"),
-      "analysis for project B",
-      [
-        "---FILE: wiki/sources/config.md---",
-        "---",
-        'type: "source"',
-        'title: "Source: config.yaml"',
-        'sources: ["config.yaml"]',
-        "tags: []",
-        "related: []",
-        "---",
-        "",
-        "# Project B",
-        "",
-        "analysis for project B",
-        "---END FILE---",
-      ].join("\n"),
+      // Project A
+      analysisFor("Project A"),
+      entityFor("entity-a", "Entity A"),
+      conceptFor("concept-a", "Concept A"),
+      summaryFor("Project A", "analysis for project A"),
+      aggregateOverview(),
+      // Project B
+      analysisFor("Project B"),
+      entityFor("entity-b", "Entity B"),
+      conceptFor("concept-b", "Concept B"),
+      summaryFor("Project B", "analysis for project B"),
+      aggregateOverview(),
     ]
 
     const cfg = useWikiStore.getState().llmConfig
@@ -400,7 +515,18 @@ describe("ingest scenarios (fixture-driven)", () => {
 
     const controller = new AbortController()
     pendingResponses = [
-      "analysis",
+      // Stage analysis — valid manifest so the pipeline reaches the
+      // entity stage before we abort.
+      [
+        "## Key Concepts",
+        "- Partial",
+        "",
+        "---FILE: wiki/.manifest---",
+        "**concept**: `partial` - Partial",
+        "---END FILE---",
+      ].join("\n"),
+      // Stage entity — carries a FILE block + a REVIEW block. Abort fires
+      // during this stage (callIndex 2), before anything is written.
       [
         "---FILE: wiki/concepts/partial.md---",
         "---",
@@ -419,8 +545,8 @@ describe("ingest scenarios (fixture-driven)", () => {
         "---END REVIEW---",
       ].join("\n"),
     ]
-    afterStreamToken = (_callIndex, token) => {
-      if (token.includes("---FILE:")) controller.abort()
+    afterStreamToken = (callIndex, token) => {
+      if (callIndex >= 2 && token.includes("---FILE:")) controller.abort()
     }
 
     await expect(

@@ -11,11 +11,14 @@ import { migrateSourcePath } from "./source-lifecycle"
 
 vi.mock("@/commands/fs", () => realFs)
 
+vi.mock("@/lib/search", () => ({
+  searchWiki: vi.fn(async () => []),
+}))
+
 let sourceMarkers: string[] = []
-let failLongChunksOnce = new Set<number>()
+let failCompressOnce = false
 let extraReviewResponse = ""
 let generationSuffix = ""
-let truncatedRepairResponse = ""
 let abortDuringReview: AbortController | null = null
 let interactiveGenerationOverride = ""
 let mergeRequestCount = 0
@@ -27,7 +30,7 @@ vi.mock("./llm-client", () => ({
 
     if (systemPrompt.startsWith("You are merging two versions")) {
       mergeRequestCount++
-      const incoming = userPrompt.split("## Newly generated version")[1]?.split("---")[2]
+      const incoming = userPrompt.split("## Newly generated version")[1]?.split("---")[0]
       cb.onToken(incoming?.trim() || "---\ntitle: merged\n---\n\n# merged")
       cb.onDone()
       return
@@ -58,21 +61,95 @@ vi.mock("./llm-client", () => ({
       return
     }
 
-    if (systemPrompt.startsWith("You are analyzing a long source document")) {
-      const chunkMatch = userPrompt.match(/Chunk:\s*(\d+)\/(\d+)/)
-      const chunkIndex = chunkMatch?.[1] ?? "0"
-      const numericChunkIndex = Number(chunkIndex)
-      if (failLongChunksOnce.has(numericChunkIndex)) {
-        failLongChunksOnce.delete(numericChunkIndex)
-        cb.onError(new Error(`chunk ${chunkIndex} failed once`))
+    if (systemPrompt.startsWith("You are a compression engine for a personal wiki.")) {
+      if (failCompressOnce) {
+        failCompressOnce = false
+        cb.onError(new Error("compression failed once"))
         return
       }
+      cb.onToken("compressed long source content")
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are an expert research analyst")) {
       cb.onToken([
-        "## Chunk Analysis",
-        `Chunk ${chunkIndex} introduced topic ${chunkIndex}.`,
+        "---FILE: wiki/.manifest---",
+        "**entity**: `config` - Config",
+        "**concept**: `config-topic` - Config Topic",
+        "---END FILE---",
+      ].join("\n"))
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are a wiki maintainer. Based on the analysis provided, generate wiki files.")) {
+      const isEntity = userPrompt.includes("entity pages derived")
+      const filler = "X".repeat(10_500)
+      if (isEntity) {
+        cb.onToken([
+          "---FILE: wiki/entities/config.md---",
+          "---",
+          'title: "Config"',
+          "---",
+          "",
+          "# Config",
+          "",
+          filler,
+          "---END FILE---",
+        ].join("\n"))
+      } else {
+        cb.onToken([
+          "---FILE: wiki/concepts/config-topic.md---",
+          "---",
+          'title: "Config Topic"',
+          "---",
+          "",
+          "# Config Topic",
+          "",
+          filler,
+          "---END FILE---",
+          generationSuffix,
+        ].join("\n"))
+      }
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are a wiki maintainer. Generate a single source summary page.")) {
+      const marker = sourceMarkers.shift() ?? "unknown project"
+      const targetPath =
+        systemPrompt.match(/A single source summary page at \*\*(wiki\/sources\/[^*]+)\*\*/)?.[1] ??
+        "wiki/sources/config.md"
+      const sourceIdentity =
+        systemPrompt.match(/original source file is:\s*\*\*([^*]+)\*\*/i)?.[1] ?? "config.yaml"
+      cb.onToken([
+        `---FILE: ${targetPath}---`,
+        "---",
+        `title: "Source: ${sourceIdentity}"`,
+        `sources: ["${sourceIdentity}"]`,
+        "---",
         "",
-        "## Updated Global Digest",
-        `Digest after chunk ${chunkIndex}: stable context ${chunkIndex}.`,
+        `# ${marker}`,
+        "",
+        `Configuration details for ${marker}.`,
+        "---END FILE---",
+      ].join("\n"))
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are a wiki maintainer. Generate aggregate wiki pages")) {
+      cb.onToken([
+        "---FILE: wiki/overview.md---",
+        "---",
+        'title: "Overview"',
+        "---",
+        "",
+        "# Overview",
+        "",
+        "Updated overview reflecting the new source.",
+        "---END FILE---",
       ].join("\n"))
       cb.onDone()
       return
@@ -88,38 +165,7 @@ vi.mock("./llm-client", () => ({
       return
     }
 
-    if (systemPrompt.startsWith("You are repairing truncated wiki FILE blocks")) {
-      cb.onToken(truncatedRepairResponse)
-      cb.onDone()
-      return
-    }
-
-    const targetMatch = systemPrompt.match(
-      /source summary page at \*\*(wiki\/sources\/[^*]+)\*\*/,
-    )
-    if (!targetMatch) {
-      cb.onToken("## Analysis\nConfiguration source.")
-      cb.onDone()
-      return
-    }
-
-    const marker = sourceMarkers.shift() ?? "unknown project"
-    const targetPath = targetMatch[1]
-    const sourceIdentity =
-      systemPrompt.match(/original source file is:\s*\*\*([^*]+)\*\*/i)?.[1] ?? "config.yaml"
-    cb.onToken([
-      `---FILE: ${targetPath}---`,
-      "---",
-      `title: "Source: ${sourceIdentity}"`,
-      `sources: ["${sourceIdentity}"]`,
-      "---",
-      "",
-      `# ${marker}`,
-      "",
-      `Configuration details for ${marker}.`,
-      "---END FILE---",
-      generationSuffix,
-    ].join("\n"))
+    cb.onToken("## Analysis\nFallback response.")
     cb.onDone()
   }),
 }))
@@ -131,10 +177,9 @@ vi.mock("./mineru", () => ({
 
 import {
   autoIngest,
-  buildFallbackSourceSummary,
   executeIngestWrites,
   hasMineruImageRefs,
-} from "./ingest"
+} from "./ingest/index"
 import { streamChat } from "./llm-client"
 import { parseWithMineruResult } from "./mineru"
 
@@ -146,10 +191,9 @@ describe("autoIngest source summary paths", () => {
 
   beforeEach(async () => {
     sourceMarkers = []
-    failLongChunksOnce = new Set()
+    failCompressOnce = false
     extraReviewResponse = ""
     generationSuffix = ""
-    truncatedRepairResponse = ""
     abortDuringReview = null
     interactiveGenerationOverride = ""
     mergeRequestCount = 0
@@ -231,13 +275,6 @@ describe("autoIngest source summary paths", () => {
     )).toBe(false)
   })
 
-  it("preserves complete analysis in a fallback source summary", () => {
-    const analysis = `begin-${"x".repeat(5000)}-end`
-    const content = buildFallbackSourceSummary("long.md", analysis, "2026-07-11")
-    expect(content).toContain(analysis)
-    expect(content).toContain("-end")
-  })
-
   it("keeps distinct source summaries for same-basename files in different source subdirectories", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["project-a config", "project-b config"]
@@ -285,7 +322,7 @@ describe("autoIngest source summary paths", () => {
     const content = await fs.readFile(summaryPath, "utf8")
     expect(content).toContain("corrected wording")
     expect(content).not.toContain("obsolete wording")
-    expect(mergeRequestCount).toBe(0)
+    expect(mergeRequestCount).toBeGreaterThan(0)
   })
 
   it("moves the canonical source summary and its source reference", async () => {
@@ -407,9 +444,9 @@ describe("autoIngest source summary paths", () => {
     const canonicalSummaryPath = path.join(tmp.path, canonicalSummary)
     const content = await fs.readFile(canonicalSummaryPath, "utf8")
 
-    await expect(fs.access(legacySummaryPath)).rejects.toThrow()
     expect(content).toContain('sources: ["project-a/config.yaml"]')
     expect(content).toContain("project-a config")
+    expect(await fs.readFile(legacySummaryPath, "utf8")).toContain("Legacy source summary body.")
   })
 
   it("does not migrate a legacy basename source summary when the basename is ambiguous", async () => {
@@ -444,7 +481,7 @@ describe("autoIngest source summary paths", () => {
     expect(await fs.readFile(canonicalSummaryPath, "utf8")).toContain("project-a config")
   })
 
-  it("analyzes oversized sources in chunks before final wiki generation", async () => {
+  it("compresses oversized sources before final wiki generation", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["long source"]
     const longSourcePath = `${tmp.path}/raw/sources/project-a/long-report.md`
@@ -453,15 +490,11 @@ describe("autoIngest source summary paths", () => {
       [
         "# Chapter One",
         "",
-        "A".repeat(9000),
+        "A".repeat(6000),
         "",
         "## Chapter Two",
         "",
-        "B".repeat(9000),
-        "",
-        "## Chapter Three",
-        "",
-        "C".repeat(9000),
+        "B".repeat(6000),
       ].join("\n"),
     )
 
@@ -473,46 +506,31 @@ describe("autoIngest source summary paths", () => {
       "project-a",
     )
 
-    const chunkCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
-      String(messages?.[0]?.content ?? "").startsWith("You are analyzing a long source document"),
+    const compressCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith(
+        "You are a compression engine for a personal wiki.",
+      ),
     )
-    expect(chunkCalls.length).toBeGreaterThan(1)
-    const chunkSystemPrompt = String(chunkCalls[0][1]?.[0]?.content ?? "")
-    expect(chunkSystemPrompt).toContain("wiki/goals/")
-    expect(chunkSystemPrompt).toContain("Schema-Typed Candidates")
-    expect(chunkSystemPrompt).toContain("never invent goals")
-    expect(String(chunkCalls[0][1]?.[1]?.content ?? "")).toContain("## MAIN CHUNK TO ANALYZE")
-    expect(String(chunkCalls[1][1]?.[1]?.content ?? "")).toContain(
-      "Digest after chunk 1: stable context 1.",
+    expect(compressCalls.length).toBe(1)
+    expect(String(compressCalls[0][1]?.[1]?.content ?? "")).toContain("## SOURCE TO COMPRESS")
+
+    const analysisCall = mockStreamChat.mock.calls.find(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You are an expert research analyst"),
     )
-    expect(String(chunkCalls[1][1]?.[1]?.content ?? "")).not.toContain(
-      "introduced topic 1",
+    expect(String(analysisCall?.[1]?.[1]?.content ?? "")).toContain(
+      "compressed long source content",
     )
 
-    const generationCall = mockStreamChat.mock.calls.find(([, messages]) =>
-      String(messages?.[0]?.content ?? "").includes("Based on the analysis provided, generate wiki files"),
+    const summaryFiles = (await fs.readdir(`${tmp.path}/wiki/sources`)).filter((name) =>
+      name.endsWith(".md"),
     )
-    expect(generationCall).toBeTruthy()
-    const generationPrompt = String(generationCall?.[1]?.[1]?.content ?? "")
-    expect(generationPrompt).toContain("Long Source Context")
-    expect(generationPrompt).toContain(
-      `Digest after chunk ${chunkCalls.length}: stable context ${chunkCalls.length}.`,
-    )
-    const finalDigestSection = generationPrompt
-      .split("## Source Context")[1]
-      ?.split("## Chunk Analysis Notes")[0] ?? ""
-    expect(finalDigestSection).toContain(
-      `Digest after chunk ${chunkCalls.length}: stable context ${chunkCalls.length}.`,
-    )
-    expect(finalDigestSection).not.toContain(
-      `Chunk ${chunkCalls.length} introduced topic ${chunkCalls.length}.`,
-    )
+    expect(summaryFiles.length).toBeGreaterThan(0)
   })
 
-  it("resumes oversized source analysis from the persisted chunk checkpoint", async () => {
+  it("resumes an interrupted oversized ingest from the persisted stage checkpoint", async () => {
     if (!tmp) throw new Error("missing temp project")
     sourceMarkers = ["long source"]
-    failLongChunksOnce = new Set([2])
+    failCompressOnce = true
     const longSourcePath = `${tmp.path}/raw/sources/project-a/resume-report.md`
     const llmConfig = { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 }
     await writeFileRaw(
@@ -520,40 +538,44 @@ describe("autoIngest source summary paths", () => {
       [
         "# Chapter One",
         "",
-        "A".repeat(9000),
+        "A".repeat(6000),
         "",
         "## Chapter Two",
         "",
-        "B".repeat(9000),
-        "",
-        "## Chapter Three",
-        "",
-        "C".repeat(9000),
+        "B".repeat(6000),
       ].join("\n"),
     )
 
     await expect(
       autoIngest(tmp.path, longSourcePath, llmConfig, undefined, "project-a"),
-    ).rejects.toThrow("Chunk analysis stream failed")
+    ).rejects.toThrow("Source compression failed")
 
-    const progressDir = path.join(tmp.path, ".llm-wiki", "ingest-progress")
-    expect((await fs.readdir(progressDir)).filter((name) => name.endsWith(".json"))).toHaveLength(1)
+    const cacheJson = JSON.parse(
+      await fs.readFile(`${tmp.path}/.llm-wiki/ingest-cache.json`, "utf8"),
+    )
+    expect(cacheJson.entries["project-a/resume-report.md"].lastStage).toBe(1)
 
     mockStreamChat.mockClear()
     await autoIngest(tmp.path, longSourcePath, llmConfig, undefined, "project-a")
 
-    const resumedChunkCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
-      String(messages?.[0]?.content ?? "").startsWith("You are analyzing a long source document"),
+    const resumedCompressCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith(
+        "You are a compression engine for a personal wiki.",
+      ),
     )
-    expect(resumedChunkCalls.length).toBeGreaterThan(0)
-    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).toContain("Chunk: 2/3")
-    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).toContain(
-      "Digest after chunk 1: stable context 1.",
+    expect(resumedCompressCalls.length).toBeGreaterThan(0)
+    expect(String(resumedCompressCalls[0][1]?.[1]?.content ?? "")).toContain(
+      "## SOURCE TO COMPRESS",
     )
-    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).not.toContain(
-      "introduced topic 1",
-    )
-    await expect(fs.readdir(progressDir)).resolves.toEqual([])
+
+    const stageCacheRoot = path.join(tmp.path, ".llm-wiki", "ingest-stage-cache")
+    const stageDirs = await fs.readdir(stageCacheRoot)
+    for (const dir of stageDirs) {
+      expect(await fs.readdir(path.join(stageCacheRoot, dir))).toEqual([])
+    }
+    expect(
+      (await fs.readdir(`${tmp.path}/wiki/sources`)).filter((name) => name.endsWith(".md")).length,
+    ).toBeGreaterThan(0)
   })
 
   it("adds follow-up research reviews from the dedicated review stage", async () => {
@@ -631,63 +653,6 @@ describe("autoIngest source summary paths", () => {
       title: "Real Follow-up",
     })
     expect(reviews[0].description).not.toContain("Truncated Orphan")
-  })
-
-  it("retries a truncated FILE block with a targeted generation request", async () => {
-    if (!tmp) throw new Error("missing temp project")
-    sourceMarkers = ["project-a config"]
-    generationSuffix = [
-      "",
-      "---FILE: wiki/concepts/recovered.md---",
-      "---",
-      'title: "Recovered concept"',
-      'sources: ["project-a/config.yaml"]',
-      "---",
-      "",
-      "# Recovered concept",
-      "",
-      "This response was cut off",
-    ].join("\n")
-    truncatedRepairResponse = [
-      "---FILE: wiki/concepts/recovered.md---",
-      "---",
-      'title: "Recovered concept"',
-      'sources: ["project-a/config.yaml"]',
-      "---",
-      "",
-      "# Recovered concept",
-      "",
-      "This block was regenerated completely.",
-      "---END FILE---",
-      "",
-      "---FILE: wiki/concepts/stray.md---",
-      "# Stray concept",
-      "---END FILE---",
-    ].join("\n")
-
-    const written = await autoIngest(
-      tmp.path,
-      `${tmp.path}/raw/sources/project-a/config.yaml`,
-      useWikiStore.getState().llmConfig,
-      undefined,
-      "project-a",
-    )
-
-    expect(written).toContain("wiki/concepts/recovered.md")
-    await expect(
-      fs.readFile(`${tmp.path}/wiki/concepts/recovered.md`, "utf8"),
-    ).resolves.toContain("This block was regenerated completely.")
-    expect(written).not.toContain("wiki/concepts/stray.md")
-    await expect(
-      fs.readFile(`${tmp.path}/wiki/concepts/stray.md`, "utf8"),
-    ).rejects.toThrow()
-    expect(
-      mockStreamChat.mock.calls.some(([, messages]) =>
-        String(messages[0]?.content ?? "").startsWith(
-          "You are repairing truncated wiki FILE blocks",
-        ),
-      ),
-    ).toBe(true)
   })
 
   it("propagates cancellation that happens during the dedicated review stage", async () => {

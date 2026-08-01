@@ -2,8 +2,6 @@ import {
   createDirectory,
   deleteFile,
   fileExists,
-  getFileSize,
-  getFileModifiedTime,
   readFile,
   readFileAsBase64,
   writeFile,
@@ -15,7 +13,7 @@ import type { ChatMessage } from "@/lib/llm-providers"
 import { useWikiStore } from "@/stores/wiki-store"
 import { parseWithMineruResult } from "@/lib/mineru"
 import { useChatStore } from "@/stores/chat-store"
-import { useActivityStore, type ActivityItem } from "@/stores/activity-store"
+import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { getFileName, isAbsolutePath, normalizePath } from "@/lib/path-utils"
 import {
@@ -43,18 +41,12 @@ import { mergePageContent, type MergeFn } from "@/lib/page-merge"
 import { searchRelatedWikiPages, mergeRelatedPages, type ManifestPage } from "./ingest-search"
 import { withProjectLock } from "@/lib/project-mutex"
 import { parseFrontmatter } from "@/lib/frontmatter"
-import { makeQuerySlug } from "@/lib/wiki-filename"
-import type { FileNode } from "@/types/wiki"
 import {
   extractAndSaveMarkdownImages,
   type SavedImage,
 } from "@/lib/extract-source-images"
 import { captionMarkdownImages } from "@/lib/image-caption-pipeline"
-import type { MultimodalConfig } from "@/stores/wiki-store"
-import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
-import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
-import { buildLanguageDirective } from "@/lib/output-language"
 import { detectLanguage } from "@/lib/detect-language"
 import { sameScriptFamily } from "@/lib/language-metadata"
 import {
@@ -62,7 +54,7 @@ import {
   validateWikiPageRouting,
 } from "@/lib/wiki-schema"
 
-import { parseFileBlocks, FILE_BLOCK_REGEX, requireBlocks } from "./file-blocks"
+import { parseFileBlocks, FILE_BLOCK_REGEX, requireBlocks, isSafeIngestPath } from "./file-blocks"
 import {
   buildAnalysisPrompt,
   buildGenerationPrompt,
@@ -74,21 +66,14 @@ import {
 import {
   currentWikiDate,
   stampGeneratedFrontmatterDates,
-  isLogPath,
   isListingPath,
+  isAppManagedAggregatePath,
   computeIngestSourceBudget,
   computeIngestGenerationMaxTokens,
   computeIngestReviewMaxTokens,
-  trimLongText,
   trimInlineStatus,
-  clampNumber,
-  hashTextHex,
   injectSourcesField,
   formatIngestWarningLogEntry,
-  LONG_SOURCE_MIN_BUDGET,
-  LONG_SOURCE_MAX_SINGLE_PASS_BUDGET,
-  LONG_SOURCE_CHUNK_MIN,
-  LONG_SOURCE_CHUNK_MAX,
   REVIEW_STAGE_MIN_SIGNAL_CHARS,
   REVIEW_STAGE_MIN_FILE_BLOCKS,
 } from "./utils"
@@ -239,6 +224,7 @@ interface AnalysisParams {
   relatedPages: string
   schema: string
   signal: AbortSignal | undefined
+  activityId?: string
 }
 
 interface AnalysisResult {
@@ -251,7 +237,7 @@ interface AnalysisResult {
 }
 
 async function runAnalysis(params: AnalysisParams): Promise<AnalysisResult> {
-  const { pp, llmConfig, sourceIdentity, folderContext, sourceContext, purpose, relatedPages, schema, signal } = params
+  const { pp, llmConfig, sourceIdentity, folderContext, sourceContext, purpose, relatedPages, schema, signal, activityId } = params
 
   const relatedPageCount = countRelatedPages(relatedPages)
   await logDiag(pp, `Stage analysis: sending analysis request (related pages=${relatedPageCount})...`)
@@ -277,6 +263,8 @@ async function runAnalysis(params: AnalysisParams): Promise<AnalysisResult> {
     { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
   )
   try { await writeFile(`${pp}/wiki/ingest-step1-reasoning.log`, analysisReasoning) } catch {}
+
+  throwIfIngestAborted(signal, activityId)
 
   await logDiag(pp, `Stage analysis complete — analysis.length=${analysis?.length ?? 0}`)
   try { await writeFile(`${pp}/wiki/ingest-step1.log`, analysis ?? "(empty)") } catch {}
@@ -316,6 +304,7 @@ interface EntityPageParams {
   overview: string
   signal?: AbortSignal
   onFileWritten?: (relativePath: string) => void
+  activityId?: string
 }
 
 interface EntityPageResult {
@@ -326,7 +315,7 @@ interface EntityPageResult {
 }
 
 async function runEntityPageGeneration(params: EntityPageParams): Promise<EntityPageResult> {
-  const { pp, llmConfig, sourceIdentity, sourceSummaryPath, sourceContext, analysis, relatedPages, schema, purpose, overview, signal, onFileWritten } = params
+  const { pp, llmConfig, sourceIdentity, sourceSummaryPath, sourceContext, analysis, relatedPages, schema, purpose, overview, signal, onFileWritten, activityId } = params
 
   const manifestPages = extractPageManifest(analysis)
   const pendingSlugs = new Set(manifestPages.map(p => p.slug))
@@ -373,7 +362,7 @@ async function runEntityPageGeneration(params: EntityPageParams): Promise<Entity
     {
       onToken: (token) => { entityGeneration += token },
       onDone: () => {},
-      onError: (err) => {
+      onError: () => {
         hadError = true
       },
       onReasoningToken: (token) => { entityReasoning += token },
@@ -389,9 +378,9 @@ async function runEntityPageGeneration(params: EntityPageParams): Promise<Entity
   if (!entityGeneration.trim()) {
     throw new IngestError("llm_output", `Entity page generation returned empty output for "${sourceIdentity}"`)
   }
-  throwIfIngestAborted(signal)
+  throwIfIngestAborted(signal, activityId)
 
-  const entityWriteResult = await writeFileBlocksWithConflictCheck(pp, entityGeneration, llmConfig, sourceIdentity, sourceSummaryPath, signal, enrichedRelatedPages)
+  const entityWriteResult = await writeFileBlocksWithConflictCheck(pp, entityGeneration, llmConfig, sourceIdentity, sourceSummaryPath, signal, enrichedRelatedPages, activityId)
   if (entityWriteResult.writtenPaths.length === 0) {
     throw new IngestError("llm_output", `Entity page generation produced no valid FILE blocks for "${sourceIdentity}"`)
   }
@@ -434,6 +423,7 @@ interface ConceptPageParams {
   accumulatedHardFailures: string[]
   signal?: AbortSignal
   onFileWritten?: (relativePath: string) => void
+  activityId?: string
 }
 
 interface ConceptPageResult {
@@ -444,7 +434,7 @@ interface ConceptPageResult {
 }
 
 async function runConceptPageGeneration(params: ConceptPageParams): Promise<ConceptPageResult> {
-  const { pp, llmConfig, sourceIdentity, sourceSummaryPath, sourceContext, analysis, relatedPages, schema, purpose, overview, accumulatedWrittenPaths, accumulatedWarnings, accumulatedHardFailures, signal, onFileWritten } = params
+  const { pp, llmConfig, sourceIdentity, sourceSummaryPath, sourceContext, analysis, relatedPages, schema, purpose, overview, accumulatedWrittenPaths, accumulatedWarnings, accumulatedHardFailures, signal, onFileWritten, activityId } = params
 
   const manifestPages = extractPageManifest(analysis)
   const enrichedRelatedPages = mergeRelatedPages(relatedPages, manifestPages)
@@ -491,7 +481,7 @@ async function runConceptPageGeneration(params: ConceptPageParams): Promise<Conc
     {
       onToken: (token) => { conceptGeneration += token },
       onDone: () => {},
-      onError: (err) => {
+      onError: () => {
         hadError = true
       },
       onReasoningToken: (token) => { conceptReasoning += token },
@@ -507,8 +497,9 @@ async function runConceptPageGeneration(params: ConceptPageParams): Promise<Conc
   if (!conceptGeneration.trim()) {
     throw new IngestError("llm_output", `Concept page generation returned empty output for "${sourceIdentity}"`)
   }
+  throwIfIngestAborted(signal, activityId)
 
-  const conceptWriteResult = await writeFileBlocksWithConflictCheck(pp, conceptGeneration, llmConfig, sourceIdentity, sourceSummaryPath, signal, enrichedRelatedPages)
+  const conceptWriteResult = await writeFileBlocksWithConflictCheck(pp, conceptGeneration, llmConfig, sourceIdentity, sourceSummaryPath, signal, enrichedRelatedPages, activityId)
   if (conceptWriteResult.writtenPaths.length === 0) {
     throw new IngestError("llm_output", `Concept page generation produced no valid FILE blocks for "${sourceIdentity}"`)
   }
@@ -552,6 +543,7 @@ interface SourceSummaryPageParams {
   accumulatedHardFailures: string[]
   signal?: AbortSignal
   onFileWritten?: (relativePath: string) => void
+  activityId?: string
 }
 
 interface SourceSummaryPageResult {
@@ -563,7 +555,7 @@ interface SourceSummaryPageResult {
 }
 
 async function runSourceSummaryPageGeneration(params: SourceSummaryPageParams): Promise<SourceSummaryPageResult> {
-  const { pp, llmConfig, sourceIdentity, sourceSummaryPath, sourceContext, analysis, schema, accumulatedWrittenPaths, accumulatedWarnings, accumulatedHardFailures, signal, onFileWritten } = params
+  const { pp, llmConfig, sourceIdentity, sourceSummaryPath, sourceContext, analysis, schema, accumulatedWrittenPaths, accumulatedWarnings, accumulatedHardFailures, signal, onFileWritten, activityId } = params
 
   await logDiag(pp, "Stage summary: sending source summary generation request...")
 
@@ -574,7 +566,6 @@ async function runSourceSummaryPageGeneration(params: SourceSummaryPageParams): 
     ? generatedSlugs.map((s) => `- ${s}`).join("\n")
     : "(no entity or concept pages)"
   const summaryRelatedPages = await searchRelatedWikiPages(pp, sourceIdentity, sourceContext)
-  const summaryRelatedCount = countRelatedPages(summaryRelatedPages)
 
   let summaryGeneration = ""
   const summaryMessages: ChatMessage[] = [
@@ -669,8 +660,9 @@ async function runSourceSummaryPageGeneration(params: SourceSummaryPageParams): 
   if (!summaryGeneration.trim()) {
     throw new IngestError("llm_output", `Source summary generation returned empty output for "${sourceIdentity}"`)
   }
+  throwIfIngestAborted(signal, activityId)
 
-  const summaryWriteResult = await writeFileBlocksWithConflictCheck(pp, summaryGeneration, llmConfig, sourceIdentity, sourceSummaryPath, signal)
+  const summaryWriteResult = await writeFileBlocksWithConflictCheck(pp, summaryGeneration, llmConfig, sourceIdentity, sourceSummaryPath, signal, undefined, activityId)
   if (!summaryWriteResult.writtenPaths.includes(sourceSummaryPath)) {
     await logDiag(pp, `SUMMARY VALIDATION FAILED: expected "${sourceSummaryPath}" in writtenPaths, got [${summaryWriteResult.writtenPaths.join(", ")}], hardFailures=[${summaryWriteResult.hardFailures.join(", ")}]`)
     throw new IngestError("llm_output",
@@ -720,6 +712,7 @@ interface AggregatePageParams {
   accumulatedHardFailures: string[]
   signal?: AbortSignal
   onFileWritten?: (relativePath: string) => void
+  activityId?: string
 }
 
 interface AggregatePageResult {
@@ -730,7 +723,7 @@ interface AggregatePageResult {
 }
 
 async function runAggregatePageGeneration(params: AggregatePageParams): Promise<AggregatePageResult> {
-  const { pp, llmConfig, sourceIdentity, sourceContext, analysis, purpose, overview, summaryRelated, accumulatedWrittenPaths, accumulatedWarnings, accumulatedHardFailures, signal, onFileWritten } = params
+  const { pp, llmConfig, sourceIdentity, analysis, purpose, overview, summaryRelated, accumulatedWrittenPaths, accumulatedWarnings, accumulatedHardFailures, signal, onFileWritten, activityId } = params
 
   // Resolve entity/concept page contents from slugs
   const resolvedPages = await Promise.all(
@@ -790,8 +783,9 @@ async function runAggregatePageGeneration(params: AggregatePageParams): Promise<
   if (!aggregateGeneration.trim()) {
     throw new IngestError("llm_output", `Aggregate (overview) generation returned empty output for "${sourceIdentity}"`)
   }
+  throwIfIngestAborted(signal, activityId)
 
-  const aggWriteResult = await writeAggregateFileBlocks(pp, aggregateGeneration, llmConfig, sourceIdentity, signal)
+  const aggWriteResult = await writeAggregateFileBlocks(pp, aggregateGeneration, llmConfig, sourceIdentity, signal, activityId)
   await appendIngestWarningLog(pp, sourceIdentity, aggWriteResult.warnings)
   const allWrittenPaths = [...accumulatedWrittenPaths, ...aggWriteResult.writtenPaths]
   const allWarnings = [...accumulatedWarnings, ...aggWriteResult.warnings]
@@ -823,6 +817,7 @@ interface ReviewSuggestionParams {
   entityGeneration: string
   conceptGeneration: string
   signal?: AbortSignal
+  activityId?: string
 }
 
 interface ReviewSuggestionResult {
@@ -830,7 +825,7 @@ interface ReviewSuggestionResult {
 }
 
 async function runReviewSuggestion(params: ReviewSuggestionParams): Promise<ReviewSuggestionResult> {
-  const { pp, llmConfig, sourceIdentity, sourceContext, analysis, relatedPages, purpose, entityGeneration, conceptGeneration, signal } = params
+  const { pp, llmConfig, sourceIdentity, sourceContext, analysis, entityGeneration, conceptGeneration, signal, activityId } = params
 
   const allGeneration = entityGeneration + conceptGeneration
   let reviewSuggestionOutput = ""
@@ -842,7 +837,7 @@ async function runReviewSuggestion(params: ReviewSuggestionParams): Promise<Revi
       await streamChat(
         llmConfig,
         [
-          { role: "system", content: buildReviewSuggestionPrompt(purpose, relatedPages, sourceIdentity, analysis, sourceContext, allGeneration, llmConfig.maxContextSize) },
+          { role: "system", content: buildReviewSuggestionPrompt(sourceIdentity, analysis, sourceContext, allGeneration, llmConfig.maxContextSize) },
           { role: "user", content: "Emit only high-value REVIEW blocks for follow-up research or unresolved knowledge gaps. Output nothing if there are none." },
         ],
         {
@@ -857,10 +852,10 @@ async function runReviewSuggestion(params: ReviewSuggestionParams): Promise<Revi
         { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: computeIngestReviewMaxTokens(llmConfig.maxContextSize) },
       )
     } catch (err) {
-      throwIfIngestAborted(signal)
+      throwIfIngestAborted(signal, activityId)
       console.warn(`[ingest] Review suggestion generation failed for "${sourceIdentity}":`, err)
     }
-    throwIfIngestAborted(signal)
+    throwIfIngestAborted(signal, activityId)
     if (reviewStageHadError) reviewSuggestionOutput = ""
   }
 
@@ -1153,8 +1148,6 @@ function prepareBlockContent(
   targetLang: string | undefined,
   today: string,
   projectSchemaRouting: Awaited<ReturnType<typeof loadProjectWikiSchemaRouting>>,
-  relatedPages: string | undefined,
-  projectPath: string,
 ): ProcessedBlock {
   let relativePath = rawRelativePath
   if (sourceSummaryPath && relativePath.startsWith("wiki/sources/")) {
@@ -1210,7 +1203,6 @@ async function writeSingleBlock(
   sourceFileName: string,
   conflictSlugsArg: string[] | undefined,
   signal: AbortSignal | undefined,
-  activityId: string | undefined,
 ): Promise<void> {
   const fullPath = `${projectPath}/${block.relativePath}`
   let content = block.content
@@ -1300,7 +1292,7 @@ async function writeFileBlocks(
     const processed = prepareBlockContent(
       block.path, block.content,
       sourceSummaryPath, sourceFileName, targetLang, today,
-      projectSchemaRouting, relatedPages, projectPath,
+      projectSchemaRouting,
     )
 
     if (processed.skipReason) {
@@ -1324,7 +1316,7 @@ async function writeFileBlocks(
 
     try {
       await writeSingleBlock(projectPath, processed, llmConfig, sourceFileName,
-        blockConflictSlugs, signal, activityId)
+        blockConflictSlugs, signal)
       writtenPaths.push(processed.relativePath)
     } catch (err) {
       const msg = `Failed to write "${processed.relativePath}": ${err instanceof Error ? err.message : String(err)}`
@@ -1551,8 +1543,6 @@ async function writeAggregateFileBlocks(
           targetLang,
           today,
           projectSchemaRouting,
-          undefined,
-          projectPath,
         )
 
         if (processed.skipReason) {
@@ -1624,11 +1614,13 @@ async function pdfReader(
   pp: string,
   sourcePath: string,
   signal?: AbortSignal,
+  activityId?: string,
 ): Promise<ReaderResult> {
   const mineruCfg = useWikiStore.getState().mineruConfig
   let sourceContent = ""
   let savedImages: SavedImage[] = []
-  if (mineruCfg.enabled && mineruCfg.token) {
+  const mineruConfigured = mineruCfg.backend === "local" || Boolean(mineruCfg.token)
+  if (mineruCfg.enabled && mineruConfigured) {
     try {
       console.log(`[ingest:pdfReader] submitting PDF to MinerU API`)
       const mineruResult = await parseWithMineruResult(
@@ -1641,9 +1633,18 @@ async function pdfReader(
       sourceContent = mineruResult.markdown
       savedImages = mineruResult.savedImages
     } catch (err) {
+      throwIfIngestAborted(signal)
       const msg = trimInlineStatus(err instanceof Error ? err.message : String(err))
-      console.warn(`[ingest:pdfReader] MinerU parsing failed: ${msg}`)
+      console.warn(`[ingest:pdfReader] MinerU parsing failed, falling back to built-in PDF extraction: ${msg}`)
+      if (activityId) {
+        useActivityStore.getState().updateItem(activityId, {
+          detail: `MinerU failed, falling back to built-in PDF extraction: ${msg}`,
+        })
+      }
+      sourceContent = await tryReadSourceTextFile(sourcePath)
     }
+  } else {
+    sourceContent = await tryReadSourceTextFile(sourcePath)
   }
   return { sourceContent, savedImages }
 }
@@ -1740,7 +1741,7 @@ async function autoIngestImpl(
   signal?: AbortSignal,
   folderContext?: string,
   onFileWritten?: (relativePath: string) => void,
-): Promise<void> {
+): Promise<string[]> {
   const activity = useActivityStore.getState()
   const fileName = getFileName(normalizePath(sourcePath))
   const activityId = activity.addItem({
@@ -1751,7 +1752,7 @@ async function autoIngestImpl(
     filesWritten: [],
   })
   try {
-    await runIngestPipeline(
+    return await runIngestPipeline(
       activityId, projectPath, sourcePath, llmConfig, signal,
       folderContext, onFileWritten,
     )
@@ -1777,7 +1778,7 @@ async function runIngestPipeline(
   signal?: AbortSignal,
   folderContext?: string,
   onFileWritten?: (relativePath: string) => void,
-): Promise<void> {
+): Promise<string[]> {
   const pp = normalizePath(projectPath)
   const sp = normalizePath(sourcePath)
   const activity = useActivityStore.getState()
@@ -1807,7 +1808,7 @@ async function runIngestPipeline(
       detail: `Skipped (unchanged) — ${cacheCheck.filesWritten.length} files from previous ingest`,
       filesWritten: cacheCheck.filesWritten,
     })
-    return
+    return cacheCheck.filesWritten
   }
   let startStage = cacheCheck.startStage
 
@@ -1840,7 +1841,7 @@ async function runIngestPipeline(
     activity.updateItem(activityId, { detail: "[Stage 1/10] Reading source file..." })
     const fileType = detectFileType(fileName)
     const readers: Record<string, () => Promise<ReaderResult>> = {
-      pdf: () => pdfReader(sourceSummarySlug, fileBase64, pp, sp, signal),
+      pdf: () => pdfReader(sourceSummarySlug, fileBase64, pp, sp, signal, activityId),
       txt: () => txtReader(sourceSummarySlug, fileBase64, pp, sp),
     }
     const reader = readers[fileType]
@@ -1931,7 +1932,7 @@ async function runIngestPipeline(
     activity.updateItem(activityId, { detail: "[Stage 5/10] Analyzing source..." })
     const analysisResult = await runAnalysis({
       pp, llmConfig, sourceIdentity, folderContext, sourceContext,
-      purpose, relatedPages, schema, signal,
+      purpose, relatedPages, schema, signal, activityId,
     })
     analysis = analysisResult.analysis
     await writeStageCache(pp, sourceIdentity, "analysis", { analysis })
@@ -1954,7 +1955,7 @@ async function runIngestPipeline(
     const entityResult = await runEntityPageGeneration({
       pp, llmConfig, sourceIdentity, sourceSummaryPath, sourceContext,
       analysis, relatedPages, schema, purpose, overview, signal,
-      onFileWritten,
+      onFileWritten, activityId,
     })
     entityGeneration = entityResult.entityGeneration
     writtenPaths = entityResult.writtenPaths
@@ -1983,7 +1984,7 @@ async function runIngestPipeline(
       accumulatedWrittenPaths: writtenPaths,
       accumulatedWarnings: writeWarnings,
       accumulatedHardFailures: hardFailures,
-      onFileWritten,
+      onFileWritten, activityId,
     })
     conceptGeneration = conceptResult.conceptGeneration
     writtenPaths = conceptResult.writtenPaths
@@ -2020,7 +2021,7 @@ async function runIngestPipeline(
       accumulatedWrittenPaths: writtenPaths,
       accumulatedWarnings: writeWarnings,
       accumulatedHardFailures: hardFailures,
-      onFileWritten,
+      onFileWritten, activityId,
     })
     summaryGeneration = summaryResult.summaryGeneration
     summaryRelated = summaryResult.summaryRelated
@@ -2050,7 +2051,7 @@ async function runIngestPipeline(
       accumulatedWrittenPaths: writtenPaths,
       accumulatedWarnings: writeWarnings,
       accumulatedHardFailures: hardFailures,
-      onFileWritten,
+      onFileWritten, activityId,
     })
     aggregateGeneration = aggResult.aggregateGeneration
     writtenPaths = aggResult.writtenPaths
@@ -2076,7 +2077,7 @@ async function runIngestPipeline(
     activity.updateItem(activityId, { detail: "[Stage 10/10] Generating review suggestions..." })
     const reviewResult = await runReviewSuggestion({
       pp, llmConfig, sourceIdentity, sourceContext, analysis,
-      relatedPages, purpose, entityGeneration, conceptGeneration, signal,
+      relatedPages, purpose, entityGeneration, conceptGeneration, signal, activityId,
     })
     reviewSuggestionOutput = reviewResult.reviewSuggestionOutput
     startStage = 10
@@ -2179,7 +2180,7 @@ async function runIngestPipeline(
     filesWritten: writtenPaths,
   })
 
-  return
+  return writtenPaths
 }
 
 // ── Public API ──
@@ -2191,8 +2192,8 @@ export async function autoIngest(
   signal?: AbortSignal,
   folderContext?: string,
   onFileWritten?: (relativePath: string) => void,
-): Promise<void> {
-  await withProjectLock(normalizePath(projectPath), () =>
+): Promise<string[]> {
+  return withProjectLock(normalizePath(projectPath), () =>
     autoIngestImpl(projectPath, sourcePath, llmConfig, signal, folderContext, onFileWritten),
   )
 }
@@ -2392,6 +2393,11 @@ export async function executeIngestWrites(
       relativePath.startsWith("wiki/sources/")
     ) {
       relativePath = activeSourceSummaryPath
+    }
+
+    if (!isSafeIngestPath(relativePath) || isAppManagedAggregatePath(relativePath)) {
+      console.warn(`[executeIngestWrites] rejected unsafe or app-managed path: ${relativePath}`)
+      continue
     }
 
     if (

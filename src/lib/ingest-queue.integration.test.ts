@@ -13,7 +13,7 @@ vi.mock("@/commands/fs", () => realFs)
 
 // Prevent real LLM calls — hang forever so tasks stay in "processing" state
 // where we can inspect the persisted file before success removes them.
-vi.mock("./ingest", () => ({
+vi.mock("./ingest/index", () => ({
   autoIngest: vi.fn(),
 }))
 
@@ -44,7 +44,7 @@ import {
   restoreQueue,
   getQueue,
 } from "./ingest-queue"
-import { autoIngest } from "./ingest"
+import { autoIngest } from "./ingest/index"
 import { useWikiStore } from "@/stores/wiki-store"
 
 const mockAutoIngest = vi.mocked(autoIngest)

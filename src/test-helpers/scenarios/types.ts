@@ -97,8 +97,14 @@ export interface EnrichScenario {
 
 /**
  * Ingest scenarios exercise autoIngest end-to-end: a source document plus
- * existing project state, through two LLM calls (analysis + generation),
- * to the files written on disk and the review items injected into the store.
+ * existing project state, through the pipeline's LLM stages (analysis →
+ * entity → concept → summary → aggregate → optional review), to the files
+ * written on disk and the review items injected into the store.
+ *
+ * Each `*Response` field is the raw streamChat text for one pipeline stage.
+ * Responses are consumed in the order above. The analysis stage MUST emit a
+ * `---FILE: wiki/.manifest---` block listing entity/concept slugs; the
+ * aggregate stage MUST emit `---FILE: wiki/overview.md---`.
  */
 export interface IngestScenario {
   name: string
@@ -111,10 +117,18 @@ export interface IngestScenario {
     path: string
     content: string
   }
-  /** Raw LLM response for stage 1 (analysis). */
+  /** Stage analysis — must emit a `---FILE: wiki/.manifest---` block listing entity/concept slugs. */
   analysisResponse: string
-  /** Raw LLM response for stage 2 (generation — contains FILE + REVIEW blocks). */
-  generationResponse: string
+  /** Stage entity — must emit at least one `---FILE: wiki/entities/...---` block. */
+  entityResponse: string
+  /** Stage concept — must emit at least one `---FILE: wiki/concepts/...---` block. */
+  conceptResponse: string
+  /** Stage summary — must emit the single source-summary FILE block. */
+  summaryResponse: string
+  /** Stage aggregate — must emit the `---FILE: wiki/overview.md---` block. */
+  aggregateResponse: string
+  /** Stage review — optional REVIEW blocks from the dedicated review stage. */
+  reviewResponse?: string
   expected: {
     /** File paths (relative to project root) that must be written. */
     writtenPaths: string[]

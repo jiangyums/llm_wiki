@@ -40,7 +40,7 @@ describe("ingest-cache — checkIngestCache", () => {
     await saveIngestCache("/project", "foo.pdf", "hello", [
       "wiki/sources/foo.md",
       "wiki/entities/bar.md",
-    ])
+    ], true)
 
     mockFileExists.mockResolvedValue(true)
     const result = await checkIngestCache("/project", "foo.pdf", "hello")
@@ -57,7 +57,7 @@ describe("ingest-cache — checkIngestCache", () => {
     await saveIngestCache("/project", "foo.pdf", "hello", [
       "wiki/sources/foo.md",
       "wiki/entities/bar.md",
-    ])
+    ], true)
 
     // wiki/entities/bar.md has been deleted since the cache was written.
     mockFileExists.mockImplementation(async (p: string) => {
@@ -86,7 +86,7 @@ describe("ingest-cache — checkIngestCache", () => {
     mockWriteFile.mockImplementation(async (_p: string, c: string) => {
       persisted = c
     })
-    await saveIngestCache("/project", "foo.pdf", "hello", ["wiki/sources/foo.md"])
+    await saveIngestCache("/project", "foo.pdf", "hello", ["wiki/sources/foo.md"], true)
 
     mockFileExists.mockRejectedValue(new Error("stat failed"))
 

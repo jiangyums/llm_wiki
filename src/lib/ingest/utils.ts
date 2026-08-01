@@ -1,6 +1,5 @@
 import { computeContextBudget } from "@/lib/context-budget"
-import { normalizePath, getFileName } from "@/lib/path-utils"
-import { parseSources, writeSources, writeFrontmatterArray } from "@/lib/sources-merge"
+import { writeFrontmatterArray } from "@/lib/sources-merge"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { makeQuerySlug } from "@/lib/wiki-filename"
 import { isSafeIngestPath } from "./file-blocks"
@@ -61,6 +60,16 @@ export function isListingPath(relativePath: string): boolean {
   )
 }
 
+/**
+ * App-managed aggregate pages that interactive ingest writes must not
+ * overwrite directly (index / overview). Case- and backslash-insensitive
+ * so an LLM can't sneak a hostile variant past the guard.
+ */
+export function isAppManagedAggregatePath(relativePath: string): boolean {
+  const normalized = relativePath.replace(/\\/g, "/").toLowerCase()
+  return normalized === "wiki/index.md" || normalized === "wiki/overview.md"
+}
+
 const CJK_OUTPUT_LANGUAGES = new Set(["Chinese", "Traditional Chinese", "Japanese", "Korean"])
 
 function containsCjk(text: string): boolean {
@@ -68,11 +77,6 @@ function containsCjk(text: string): boolean {
 }
 
 // ── Frontmatter / Content Utilities ──
-
-function extractTitleFromContent(content: string): string {
-  const headingMatch = content.match(/^#\s+(.+)$/m)
-  return headingMatch ? headingMatch[1].trim() : ""
-}
 
 function extractGeneratedPageTitle(content: string): string | null {
   const title = parseFrontmatter(content).frontmatter?.title
@@ -181,36 +185,6 @@ export function isAggregateRepairSafe(
 export function injectSourcesField(content: string, sourceFileName: string): string {
   if (!/^\s*---\n/.test(content)) return content
   return writeFrontmatterArray(content, "sources", [sourceFileName])
-}
-
-// ── Source Field Canonicalization ──
-
-export function canonicalizeSourcesField(content: string, sourceIdentity: string): string {
-  if (!/^\s*---\n/.test(content)) return content
-
-  const identityKey = normalizePath(sourceIdentity).toLowerCase()
-  const identityBaseName = getFileName(sourceIdentity).toLowerCase()
-  const sourceValues = parseSources(content)
-  const canonicalValues = sourceValues.map((source) => {
-    const normalized = normalizePath(source)
-    const key = normalized.toLowerCase()
-    if (key === identityKey) return sourceIdentity
-    if (!normalized.includes("/") && key === identityBaseName) return sourceIdentity
-    return source
-  })
-  if (!canonicalValues.some((source) => normalizePath(source).toLowerCase() === identityKey)) {
-    canonicalValues.push(sourceIdentity)
-  }
-
-  const seen = new Set<string>()
-  const deduped = canonicalValues.filter((source) => {
-    const key = normalizePath(source).toLowerCase()
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-
-  return writeSources(content, deduped)
 }
 
 // ── Warning / Diagnostics ──

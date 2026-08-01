@@ -615,7 +615,7 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
       // Full auto-ingest: extract entities, concepts, cross-references from saved content
       const llmConfig = getTaskLlmConfig("ingest")
       if (hasUsableLlm(llmConfig)) {
-        const { autoIngest } = await import("@/lib/ingest")
+        const { autoIngest } = await import("@/lib/ingest/index")
         autoIngest(pp, filePath, llmConfig).catch((err) =>
           console.error("Failed to auto-ingest saved query:", err)
         )
