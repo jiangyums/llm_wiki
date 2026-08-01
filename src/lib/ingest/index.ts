@@ -1,5 +1,5 @@
 export { autoIngest, startIngest, executeIngestWrites } from "./pipeline"
-export { IngestError, type IngestErrorCategory } from "./errors"
+export { IngestError, LlmApiError, type IngestErrorCategory } from "./errors"
 export {
   parseFileBlocks,
   isSafeIngestPath,

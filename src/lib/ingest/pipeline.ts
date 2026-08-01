@@ -28,20 +28,19 @@ import {
   writeStageCache,
   readStageCache,
   clearStageCaches,
-  type StageAnalysisCache,
-  type StageEntityCache,
-  type StageConceptCache,
-  type StageSummaryCache,
-  type StageCaptionCache,
-  type StageRagCache,
-  type StageCompressCache,
-  type StageReaderCache,
-  type StageReviewCache,
+  type StepAnalysisCache,
+  type StepEntityCache,
+  type StepConceptCache,
+  type StepSummaryCache,
+  type StepCaptionCache,
+  type StepRagCache,
+  type StepCompressCache,
+  type StepReaderCache,
+  type StepReviewCache,
 } from "@/lib/ingest/stage-cache"
 import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
 import { mergePageContent, type MergeFn } from "@/lib/page-merge"
-import { parseIndexContent, serializeIndexSections } from "@/lib/index-records"
-import { searchRelatedWikiPages, mergeRelatedPages } from "@/lib/ingest-search"
+import { searchRelatedWikiPages, mergeRelatedPages, type ManifestPage } from "./ingest-search"
 import { withProjectLock } from "@/lib/project-mutex"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { makeQuerySlug } from "@/lib/wiki-filename"
@@ -92,7 +91,6 @@ import {
   LONG_SOURCE_CHUNK_MAX,
   REVIEW_STAGE_MIN_SIGNAL_CHARS,
   REVIEW_STAGE_MIN_FILE_BLOCKS,
-  splitSourceIntoSemanticonceptCachehunks,
 } from "./utils"
 import {
   ingestImageExtractionPromises,
@@ -109,9 +107,8 @@ import {
 
 import { compressLongSource } from "./long-source"
 
-import { wikiIndex } from "@/lib/index-records"
-import { LlmApiError } from "@/lib/llm-client"
-import { IngestError, type IngestErrorCategory } from "./errors"
+import { wikiIndex } from "./index-records"
+import { IngestError, LlmApiError, type IngestErrorCategory } from "./errors"
 
 // ── Stage Resume Sentinel ──
 
@@ -214,12 +211,6 @@ function contentMatchesTargetLanguage(content: string, target: string): boolean 
 }
 
 // ── Page Manifest Extraction ──
-
-interface ManifestPage {
-  type: "entity" | "concept"
-  slug: string
-  title: string
-}
 
 function extractPageManifest(analysis: string): ManifestPage[] {
   const pages: ManifestPage[] = []
@@ -1631,6 +1622,7 @@ async function pdfReader(
   slug: string,
   fileBase64: { base64: string },
   pp: string,
+  sourcePath: string,
   signal?: AbortSignal,
 ): Promise<ReaderResult> {
   const mineruCfg = useWikiStore.getState().mineruConfig
@@ -1640,7 +1632,7 @@ async function pdfReader(
     try {
       console.log(`[ingest:pdfReader] submitting PDF to MinerU API`)
       const mineruResult = await parseWithMineruResult(
-        mineruCfg, "", undefined,
+        mineruCfg, sourcePath, undefined,
         undefined,
         signal,
         { projectPath: pp, sourceSummarySlug: slug },
@@ -1848,7 +1840,7 @@ async function runIngestPipeline(
     activity.updateItem(activityId, { detail: "[Stage 1/10] Reading source file..." })
     const fileType = detectFileType(fileName)
     const readers: Record<string, () => Promise<ReaderResult>> = {
-      pdf: () => pdfReader(sourceSummarySlug, fileBase64, pp, signal),
+      pdf: () => pdfReader(sourceSummarySlug, fileBase64, pp, sp, signal),
       txt: () => txtReader(sourceSummarySlug, fileBase64, pp, sp),
     }
     const reader = readers[fileType]
@@ -1876,7 +1868,7 @@ async function runIngestPipeline(
   // ── Stage 2: Compress long source ──
   if (startStage == 1) {
     if (resumeFlag === NEED_RESTORE) {
-      const readerCache = await readStageCache<StageReaderCache>(pp, sourceIdentity, "reader")
+      const readerCache = await readStageCache<StepReaderCache>(pp, sourceIdentity, "reader")
       sourceContent = readerCache?.sourceContent ?? ""
       savedImages = readerCache?.savedImages ?? []
       resumeFlag = NO_NEED_RESTORE
@@ -1897,9 +1889,9 @@ async function runIngestPipeline(
   // ── Stage 3: Caption embedded images ──
   if (startStage == 2) {
     if (resumeFlag === NEED_RESTORE) {
-      const compressCache = await readStageCache<StageCompressCache>(pp, sourceIdentity, "compress")
+      const compressCache = await readStageCache<StepCompressCache>(pp, sourceIdentity, "compress")
       sourceContext = compressCache?.sourceContext ?? ""
-      const readerCache = await readStageCache<StageReaderCache>(pp, sourceIdentity, "reader")
+      const readerCache = await readStageCache<StepReaderCache>(pp, sourceIdentity, "reader")
       savedImages = readerCache?.savedImages ?? []
       resumeFlag = NO_NEED_RESTORE
     }
@@ -1916,7 +1908,7 @@ async function runIngestPipeline(
   // ── Stage 4: RAG retrieve related wiki pages ──
   if (startStage == 3) {
     if (resumeFlag === NEED_RESTORE) {
-      const captionCache = await readStageCache<StageCaptionCache>(pp, sourceIdentity, "caption")
+      const captionCache = await readStageCache<StepCaptionCache>(pp, sourceIdentity, "caption")
       enrichedSourceContent = captionCache?.enrichedSourceContent ?? ""
       resumeFlag = NO_NEED_RESTORE
     }
@@ -1930,9 +1922,9 @@ async function runIngestPipeline(
   // ── Stage 5: Analysis ──
   if (startStage == 4) {
     if (resumeFlag === NEED_RESTORE) {
-      const compressCache = await readStageCache<StageCompressCache>(pp, sourceIdentity, "compress")
+      const compressCache = await readStageCache<StepCompressCache>(pp, sourceIdentity, "compress")
       sourceContext = compressCache?.sourceContext ?? ""
-      const ragCache = await readStageCache<StageRagCache>(pp, sourceIdentity, "rag")
+      const ragCache = await readStageCache<StepRagCache>(pp, sourceIdentity, "rag")
       relatedPages = ragCache?.relatedPages ?? ""
       resumeFlag = NO_NEED_RESTORE
     }
@@ -1950,11 +1942,11 @@ async function runIngestPipeline(
   // ── Stage 6: Entity pages ──
   if (startStage == 5) {
     if (resumeFlag === NEED_RESTORE) {
-      const analysisCache = await readStageCache<StageAnalysisCache>(pp, sourceIdentity, "analysis")
+      const analysisCache = await readStageCache<StepAnalysisCache>(pp, sourceIdentity, "analysis")
       analysis = analysisCache?.analysis ?? ""
-      const ragCache = await readStageCache<StageRagCache>(pp, sourceIdentity, "rag")
+      const ragCache = await readStageCache<StepRagCache>(pp, sourceIdentity, "rag")
       relatedPages = ragCache?.relatedPages ?? ""
-      const compressCache = await readStageCache<StageCompressCache>(pp, sourceIdentity, "compress")
+      const compressCache = await readStageCache<StepCompressCache>(pp, sourceIdentity, "compress")
       sourceContext = compressCache?.sourceContext ?? ""
       resumeFlag = NO_NEED_RESTORE
     }
@@ -1976,11 +1968,11 @@ async function runIngestPipeline(
   // ── Stage 7: Concept pages ──
   if (startStage == 6) {
     if (resumeFlag === NEED_RESTORE) {
-      const analysisCache = await readStageCache<StageAnalysisCache>(pp, sourceIdentity, "analysis")
+      const analysisCache = await readStageCache<StepAnalysisCache>(pp, sourceIdentity, "analysis")
       analysis = analysisCache?.analysis ?? ""
-      const ragCache = await readStageCache<StageRagCache>(pp, sourceIdentity, "rag")
+      const ragCache = await readStageCache<StepRagCache>(pp, sourceIdentity, "rag")
       relatedPages = ragCache?.relatedPages ?? ""
-      const compressCache = await readStageCache<StageCompressCache>(pp, sourceIdentity, "compress")
+      const compressCache = await readStageCache<StepCompressCache>(pp, sourceIdentity, "compress")
       sourceContext = compressCache?.sourceContext ?? ""
       resumeFlag = NO_NEED_RESTORE
     }
@@ -2005,17 +1997,17 @@ async function runIngestPipeline(
   // ── Stage 8: Source summary page ──
   if (startStage == 7) {
     if (resumeFlag === NEED_RESTORE) {
-      const analysisCache = await readStageCache<StageAnalysisCache>(pp, sourceIdentity, "analysis")
+      const analysisCache = await readStageCache<StepAnalysisCache>(pp, sourceIdentity, "analysis")
       analysis = analysisCache?.analysis ?? ""
-      const compressCache = await readStageCache<StageCompressCache>(pp, sourceIdentity, "compress")
+      const compressCache = await readStageCache<StepCompressCache>(pp, sourceIdentity, "compress")
       sourceContext = compressCache?.sourceContext ?? ""
-      const entityCache = await readStageCache<StageEntityCache>(pp, sourceIdentity, "entity")
+      const entityCache = await readStageCache<StepEntityCache>(pp, sourceIdentity, "entity")
       writtenPaths = entityCache?.writtenPaths?.length ? [...entityCache.writtenPaths] : []
-      const conceptCache = await readStageCache<StageConceptCache>(pp, sourceIdentity, "concept")
+      const conceptCache = await readStageCache<StepConceptCache>(pp, sourceIdentity, "concept")
       if (writtenPaths.length === 0 && conceptCache?.writtenPaths?.length) {
         writtenPaths = [...conceptCache.writtenPaths]
       }
-      const readerCache = await readStageCache<StageReaderCache>(pp, sourceIdentity, "reader")
+      const readerCache = await readStageCache<StepReaderCache>(pp, sourceIdentity, "reader")
       savedImages = readerCache?.savedImages ?? []
       entityGeneration = entityCache?.entityGeneration ?? ""
       conceptGeneration = conceptCache?.conceptGeneration ?? ""
@@ -2043,11 +2035,11 @@ async function runIngestPipeline(
   // ── Stage 9: Aggregate pages ──
   if (startStage == 8) {
     if (resumeFlag === NEED_RESTORE) {
-      const summaryCache = await readStageCache<StageSummaryCache>(pp, sourceIdentity, "summary")
+      const summaryCache = await readStageCache<StepSummaryCache>(pp, sourceIdentity, "summary")
       summaryRelated = summaryCache?.summaryRelated ?? []
-      const analysisCache = await readStageCache<StageAnalysisCache>(pp, sourceIdentity, "analysis")
+      const analysisCache = await readStageCache<StepAnalysisCache>(pp, sourceIdentity, "analysis")
       analysis = analysisCache?.analysis ?? ""
-      const readerCache = await readStageCache<StageReaderCache>(pp, sourceIdentity, "reader")
+      const readerCache = await readStageCache<StepReaderCache>(pp, sourceIdentity, "reader")
       savedImages = readerCache?.savedImages ?? []
       resumeFlag = NO_NEED_RESTORE
     }
@@ -2075,9 +2067,9 @@ async function runIngestPipeline(
   // ── Stage 10: Review suggestion ──
   if (startStage == 9) {
     if (resumeFlag === NEED_RESTORE) {
-      const entityCache = await readStageCache<StageEntityCache>(pp, sourceIdentity, "entity")
+      const entityCache = await readStageCache<StepEntityCache>(pp, sourceIdentity, "entity")
       entityGeneration = entityCache?.entityGeneration ?? ""
-      const conceptCache = await readStageCache<StageConceptCache>(pp, sourceIdentity, "concept")
+      const conceptCache = await readStageCache<StepConceptCache>(pp, sourceIdentity, "concept")
       conceptGeneration = conceptCache?.conceptGeneration ?? ""
       resumeFlag = NO_NEED_RESTORE
     }
@@ -2095,11 +2087,11 @@ async function runIngestPipeline(
   // ── Stage 11: Parse review items ──
   if (startStage == 10) {
     if (resumeFlag === NEED_RESTORE) {
-      const entityCache = await readStageCache<StageEntityCache>(pp, sourceIdentity, "entity")
+      const entityCache = await readStageCache<StepEntityCache>(pp, sourceIdentity, "entity")
       entityGeneration = entityCache?.entityGeneration ?? ""
-      const conceptCache = await readStageCache<StageConceptCache>(pp, sourceIdentity, "concept")
+      const conceptCache = await readStageCache<StepConceptCache>(pp, sourceIdentity, "concept")
       conceptGeneration = conceptCache?.conceptGeneration ?? ""
-      const reviewCache = await readStageCache<StageReviewCache>(pp, sourceIdentity, "review")
+      const reviewCache = await readStageCache<StepReviewCache>(pp, sourceIdentity, "review")
       reviewSuggestionOutput = reviewCache?.reviewSuggestionOutput ?? ""
       resumeFlag = NO_NEED_RESTORE
     }

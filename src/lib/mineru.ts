@@ -664,18 +664,21 @@ async function parseWithLocalMineru(
   onProgress?: (msg: string) => void,
   signal?: AbortSignal,
   assetOptions?: MineruAssetOptions,
+  sourceBase64?: { base64: string },
 ): Promise<MineruExtractedMarkdown> {
   const httpFetch = await getHttpFetch()
   const apiBase = localMineruApiBase(config.localEndpoint)
   if (config.localBackend?.endsWith("http-client") && !config.localServerUrl?.trim()) {
     throw new Error("MinerU HTTP client backends require a model server URL")
   }
-  const fileSize = await getFileSize(sourcePath)
+  const fileSize = sourceBase64
+    ? Math.floor((sourceBase64.base64.length * 3) / 4)
+    : await getFileSize(sourcePath)
   if (fileSize > MAX_ACCURATE_PARSE_BYTES) {
     throw new Error("MinerU accurate parsing supports files up to 200 MB")
   }
   throwIfAborted(signal)
-  const { base64 } = await readFileAsBase64(sourcePath)
+  const { base64 } = sourceBase64 ?? (await readFileAsBase64(sourcePath))
   const bytes = decodeBase64ToBytes(base64)
   const fileBuffer = bytes.buffer.slice(
     bytes.byteOffset,
@@ -822,6 +825,7 @@ export async function parseWithMineruResult(
   onProgress?: (msg: string) => void,
   signal?: AbortSignal,
   assetOptions?: MineruAssetOptions,
+  sourceBase64?: { base64: string },
 ): Promise<MineruExtractedMarkdown> {
   throwIfAborted(signal)
 
@@ -834,6 +838,7 @@ export async function parseWithMineruResult(
       onProgress,
       signal,
       assetOptions,
+      sourceBase64,
     )
     onProgress?.("Done")
     return result
@@ -854,15 +859,18 @@ export async function parseWithMineruResult(
   } else {
     onProgress?.("Uploading file to MinerU...")
     throwIfAborted(signal)
-    const fileSize = await getFileSize(sourcePath)
+
+    const fileSize = sourceBase64
+      ? Math.floor((sourceBase64.base64.length * 3) / 4)
+      : await getFileSize(sourcePath)
     if (fileSize > MAX_ACCURATE_PARSE_BYTES) {
       throw new Error("MinerU accurate parsing supports files up to 200 MB")
     }
 
-    // Read file as base64
+    // Read file as base64 (skip re-reading when the caller already has it)
     const fileName = sourcePath.split("/").pop() ?? "document.pdf"
     throwIfAborted(signal)
-    const { base64 } = await readFileAsBase64(sourcePath)
+    const { base64 } = sourceBase64 ?? (await readFileAsBase64(sourcePath))
 
     const { batchId } = await uploadFileForTask(
       config.token,
