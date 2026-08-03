@@ -37,19 +37,30 @@ import { addToRecentProjects } from "@/lib/project-store"
 
 interface GroupUiEntry {
   group: DuplicateGroup
-  canonicalSlug: string
+  canonicalPath: string
   /** Becomes true when the user marks the group as "not duplicates"
    *  in this session — the card transitions to skipped state. */
   skipped: boolean
 }
 
-/** Match a card to its task in the queue (if any) by slug-set. */
+/** Match a card to its task in the queue (if any) by page-path set. */
 function findTaskForGroup(
   tasks: readonly DedupTask[],
-  slugs: readonly string[],
+  pages: readonly string[],
 ): DedupTask | undefined {
-  const key = groupKey(slugs)
-  return tasks.find((t) => groupKey(t.group.slugs) === key)
+  const key = groupKey(pages)
+  return tasks.find((t) => groupKey(t.group.pages) === key)
+}
+
+/** `wiki/entities/foo.md` → `foo`. */
+function basenameFromPath(path: string): string {
+  return (path.split("/").pop() ?? path).replace(/\.md$/, "")
+}
+
+/** `wiki/entities/foo.md` → `entities`. */
+function typeFromPath(path: string): string {
+  const parts = path.split("/")
+  return parts.length >= 2 ? parts[parts.length - 2] : "page"
 }
 
 export function MaintenanceSection() {
@@ -129,7 +140,7 @@ export function MaintenanceSection() {
       setGroups(
         detected.map((g) => ({
           group: g,
-          canonicalSlug: g.slugs[0],
+          canonicalPath: g.pages[0],
           skipped: false,
         })),
       )
@@ -142,9 +153,9 @@ export function MaintenanceSection() {
   }, [project, llmConfig])
 
   const handleCanonicalChange = useCallback(
-    (idx: number, slug: string) => {
+    (idx: number, path: string) => {
       setGroups((prev) =>
-        prev.map((g, i) => (i === idx ? { ...g, canonicalSlug: slug } : g)),
+        prev.map((g, i) => (i === idx ? { ...g, canonicalPath: path } : g)),
       )
     },
     [],
@@ -154,7 +165,7 @@ export function MaintenanceSection() {
     async (entry: GroupUiEntry) => {
       if (!project) return
       try {
-        await enqueueMerge(project.id, entry.group, entry.canonicalSlug)
+        await enqueueMerge(project.id, entry.group, entry.canonicalPath)
         // Refresh immediately so the card flips to "queued" without
         // waiting for the next 1s poll tick.
         setTasks([...getQueue()])
@@ -167,6 +178,11 @@ export function MaintenanceSection() {
   )
 
   const handleCancel = useCallback(async (taskId: string) => {
+    // Remember this group so the "task left the queue" transition below
+    // treats it as cancelled (card returns to idle) rather than as a
+    // completed merge (card disappears).
+    const task = getQueue().find((t) => t.id === taskId)
+    if (task) cancelledKeysRef.current.add(groupKey(task.group.pages))
     await cancelTask(taskId)
     setTasks([...getQueue()])
     setQueueSummary(getQueueSummary())
@@ -190,7 +206,7 @@ export function MaintenanceSection() {
       const entry = groups[idx]
       if (!entry) return
       try {
-        await addNotDuplicate(project.path, entry.group.slugs)
+        await addNotDuplicate(project.path, entry.group.pages)
         setGroups((prev) =>
           prev.map((g, i) => (i === idx ? { ...g, skipped: true } : g)),
         )
@@ -205,39 +221,59 @@ export function MaintenanceSection() {
   // - Card not in queue + not skipped → idle, can merge / dismiss
   // - Task pending → "Queued (N ahead)"
   // - Task processing → "Merging…"
-  // - Task gone (after success) → "Merged" (queue removes done tasks
-  //     immediately, so we only know it succeeded if we observed it
-  //     in-flight before. Track that with a session-local set.)
+  // - Task gone after being observed in-flight → the merge finished:
+  //     drop the card from the list so merged pages stop appearing
+  //     as candidates. (The queue removes done tasks immediately, so
+  //     "success" is inferred from observing the task then seeing it
+  //     vanish. A user-initiated cancel is tracked separately so it
+  //     returns the card to idle instead.)
   // - Task failed → show error + retry / delete.
   const [recentlyMergedKeys, setRecentlyMergedKeys] = useState<Set<string>>(
     () => new Set(),
   )
+  const lastSeenTaskKeysRef = useRefInit<Set<string>>(() => new Set())
+  const cancelledKeysRef = useRefInit<Set<string>>(() => new Set())
 
   useEffect(() => {
-    // Detect transitions out of the queue: a slug-set we saw last
-    // tick is now gone → it completed (cancelled paths also remove,
-    // but only with explicit user action that re-renders separately).
+    // Detect transitions out of the queue: a page-set we saw last
+    // tick is now gone → either the merge completed or the task was
+    // cancelled. Completed merges remove the card from the list;
+    // cancelled ones keep it so the user can merge again later.
+    const currentKeys = new Set(tasks.map((t) => groupKey(t.group.pages)))
+    const completedKeys = new Set<string>()
+    for (const g of groups) {
+      const k = groupKey(g.group.pages)
+      if (lastSeenTaskKeysRef.current.has(k) && !currentKeys.has(k)) {
+        completedKeys.add(k)
+      }
+    }
+    lastSeenTaskKeysRef.current = currentKeys
+    if (completedKeys.size === 0) return
+
+    let changed = false
     setRecentlyMergedKeys((prev) => {
-      const currentKeys = new Set(tasks.map((t) => groupKey(t.group.slugs)))
-      let changed = false
       const next = new Set(prev)
-      for (const g of groups) {
-        const k = groupKey(g.group.slugs)
-        const wasInFlight = lastSeenTaskKeysRef.current.has(k)
-        if (wasInFlight && !currentKeys.has(k) && !next.has(k)) {
+      for (const k of completedKeys) {
+        if (cancelledKeysRef.current.has(k)) continue
+        if (!next.has(k)) {
           next.add(k)
           changed = true
         }
       }
-      lastSeenTaskKeysRef.current = currentKeys
       return changed ? next : prev
     })
+    setGroups((prev) =>
+      prev.filter((g) => {
+        const k = groupKey(g.group.pages)
+        if (cancelledKeysRef.current.has(k)) return true
+        return !completedKeys.has(k)
+      }),
+    )
     // We intentionally only re-run when tasks change — the closure
     // over `groups` is fine because newly-scanned groups can't be
     // "recently merged" until they've been observed in-flight first.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks])
-  const lastSeenTaskKeysRef = useRefInit<Set<string>>(() => new Set())
 
   // Pending position helper: "queued (N ahead)" — count pending tasks
   // before this one in arrival order.
@@ -357,20 +393,25 @@ export function MaintenanceSection() {
       />
 
       {groups.map((entry, idx) => {
-        const task = findTaskForGroup(tasks, entry.group.slugs)
-        const merged = recentlyMergedKeys.has(groupKey(entry.group.slugs))
+        const mergedKey = groupKey(entry.group.pages)
+        // A merge that already completed (observed in a previous tick,
+        // or the card was already marked Merged before this session's
+        // fix) should no longer be listed as a candidate. The queue
+        // removed the done task, so the merged pages won't be detected
+        // again on a re-scan anyway.
+        if (recentlyMergedKeys.has(mergedKey)) return null
+        const task = findTaskForGroup(tasks, entry.group.pages)
         return (
           <DuplicateGroupCard
-            key={entry.group.slugs.join(",")}
+            key={entry.group.pages.join(",")}
             entry={entry}
             task={task}
-            merged={merged}
             pendingPosition={
               task && task.status === "pending"
                 ? pendingPositionByTaskId.get(task.id) ?? 0
                 : 0
             }
-            onCanonicalChange={(slug) => handleCanonicalChange(idx, slug)}
+            onCanonicalChange={(path) => handleCanonicalChange(idx, path)}
             onEnqueue={() => void handleEnqueue(entry)}
             onCancel={() => task && void handleCancel(task.id)}
             onRetry={() => task && void handleRetry(task.id)}
@@ -422,8 +463,8 @@ function QueueOrphanList({
   pendingPositionByTaskId,
 }: QueueOrphanListProps) {
   const { t } = useTranslation()
-  const groupKeys = new Set(groups.map((g) => groupKey(g.group.slugs)))
-  const orphans = tasks.filter((t) => !groupKeys.has(groupKey(t.group.slugs)))
+  const groupKeys = new Set(groups.map((g) => groupKey(g.group.pages)))
+  const orphans = tasks.filter((t) => !groupKeys.has(groupKey(t.group.pages)))
 
   if (orphans.length === 0) return null
 
@@ -464,10 +505,10 @@ function QueueOrphanList({
           key={task.id}
           className="flex flex-wrap items-center gap-2 rounded border border-border/40 bg-background px-3 py-2 text-xs"
         >
-          <code className="font-mono">{task.group.slugs.join(" + ")}</code>
+          <code className="font-mono">{task.group.pages.join(" + ")}</code>
           <span className="text-muted-foreground">
             →{" "}
-            <code className="font-mono">{task.canonicalSlug}</code>
+            <code className="font-mono">{task.canonicalPath}</code>
           </span>
           <span className="ml-auto inline-flex items-center gap-1">
             <TaskStatusChip
@@ -557,9 +598,8 @@ function TaskStatusChip({ task, pendingPosition }: ChipProps) {
 interface CardProps {
   entry: GroupUiEntry
   task: DedupTask | undefined
-  merged: boolean
   pendingPosition: number
-  onCanonicalChange: (slug: string) => void
+  onCanonicalChange: (path: string) => void
   onEnqueue: () => void
   onCancel: () => void
   onRetry: () => void
@@ -569,7 +609,6 @@ interface CardProps {
 function DuplicateGroupCard({
   entry,
   task,
-  merged,
   pendingPosition,
   onCanonicalChange,
   onEnqueue,
@@ -578,11 +617,11 @@ function DuplicateGroupCard({
   onNotDuplicate,
 }: CardProps) {
   const { t } = useTranslation()
-  const { group, canonicalSlug, skipped } = entry
+  const { group, canonicalPath, skipped } = entry
 
   const inFlight = !!task && (task.status === "pending" || task.status === "processing")
   const failed = !!task && task.status === "failed"
-  const finished = merged || skipped
+  const finished = skipped
 
   const confidenceClass =
     group.confidence === "high"
@@ -604,15 +643,9 @@ function DuplicateGroupCard({
         <span className="text-xs text-muted-foreground">
           {t("settings.sections.maintenance.dedup.candidates", {
             defaultValue: "{{n}} candidates",
-            n: group.slugs.length,
+            n: group.pages.length,
           })}
         </span>
-        {merged && (
-          <span className="ml-auto inline-flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            {t("settings.sections.maintenance.dedup.merged", { defaultValue: "Merged" })}
-          </span>
-        )}
         {skipped && (
           <span className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground">
             {t("settings.sections.maintenance.dedup.skipped", { defaultValue: "Marked not duplicates" })}
@@ -634,22 +667,27 @@ function DuplicateGroupCard({
           <div className="space-y-1.5">
             <Label className="text-xs">
               {t("settings.sections.maintenance.dedup.canonicalLabel", {
-                defaultValue: "Keep this slug as canonical:",
+                defaultValue: "Keep this page as canonical:",
               })}
             </Label>
-            {group.slugs.map((slug) => (
+            {group.pages.map((path) => (
               <label
-                key={slug}
+                key={path}
                 className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-accent"
               >
                 <input
                   type="radio"
-                  name={`canonical-${group.slugs.join(",")}`}
-                  checked={canonicalSlug === slug}
-                  onChange={() => onCanonicalChange(slug)}
+                  name={`canonical-${group.pages.join(",")}`}
+                  checked={canonicalPath === path}
+                  onChange={() => onCanonicalChange(path)}
                   disabled={inFlight}
                 />
-                <code className="font-mono text-xs">{slug}</code>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <code className="truncate font-mono text-xs">{path}</code>
+                  <span className="shrink-0 rounded bg-muted px-1 py-px text-[10px] font-semibold uppercase text-muted-foreground">
+                    {typeFromPath(path)}
+                  </span>
+                </span>
               </label>
             ))}
           </div>
@@ -659,8 +697,8 @@ function DuplicateGroupCard({
               <>
                 <Button size="sm" onClick={onEnqueue}>
                   {t("settings.sections.maintenance.dedup.mergeButton", {
-                    defaultValue: "Merge into {{slug}}",
-                    slug: canonicalSlug,
+                    defaultValue: "Merge into {{page}}",
+                    page: basenameFromPath(canonicalPath),
                   })}
                 </Button>
                 <Button size="sm" variant="ghost" onClick={onNotDuplicate}>
