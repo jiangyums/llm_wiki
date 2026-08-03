@@ -664,11 +664,13 @@ pub async fn vector_get_page_chunks(
             .await
             .map_err(|e| format!("Open table error: {e}"))?;
 
-        let results_stream = table
-            .filter(format!("page_id = '{}'", page_id))
-            .execute()
-            .await
-            .map_err(|e| format!("Scan error: {e}"))?;
+        // Scan all rows, then filter by page_id on the Rust side.
+// LanceDB's Query doesn't support .filter() in this version.
+let results_stream = table
+    .query()
+    .execute()
+    .await
+    .map_err(|e| format!("Scan error: {e}"))?;
 
         use futures::TryStreamExt;
         let batches: Vec<RecordBatch> = results_stream
@@ -678,6 +680,10 @@ pub async fn vector_get_page_chunks(
 
         let mut out: Vec<ChunkVector> = Vec::new();
         for batch in &batches {
+            let page_ids_col = batch
+                .column_by_name("page_id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or("Missing page_id column")?;
             let chunk_ids = batch
                 .column_by_name("chunk_id")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>())
@@ -700,6 +706,9 @@ pub async fn vector_get_page_chunks(
                 .ok_or("Missing vector column")?;
 
             for i in 0..batch.num_rows() {
+                // Filter by page_id on the Rust side (LanceDB Query doesn't support .filter() in this version)
+                if page_ids_col.value(i) != page_id { continue }
+
                 let values = vectors.value(i);
                 let arr = values.as_any().downcast_ref::<Float32Array>().ok_or(
                     "Vector column is not Float32",
