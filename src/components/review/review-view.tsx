@@ -427,7 +427,10 @@ function ReviewCard({
   onSelectedChange: (id: string, selected: boolean) => void
 }) {
   const { t } = useTranslation()
-  const config = typeConfig[item.type]
+  // `item.type` may be an unknown value (a persisted/imported item from
+  // another version, a hand-edited review.json). Fall back to a default
+  // config so rendering never crashes reading `config.icon`.
+  const config = typeConfig[item.type] ?? typeConfig.duplicate
   const Icon = config.icon
 
   return (
