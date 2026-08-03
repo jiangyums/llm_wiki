@@ -17,8 +17,14 @@
  *      it to identify groups of slugs likely to refer to the same
  *      thing. Returns parsed JSON groups with reason + confidence.
  *      The LLM call is injected so unit tests don't hit a model.
+ *      Detection works in slugs (what the LLM sees) but the results
+ *      are immediately resolved to *wiki-relative page paths* via
+ *      resolveDuplicateGroups, so a duplicate basename (e.g. both
+ *      wiki/entities/amanda.md and wiki/concepts/amanda.md share the
+ *      slug "amanda") expands to two distinct pages instead of
+ *      collapsing into one.
  *   3. mergeDuplicateGroup: given a confirmed group + chosen
- *      canonical slug, merge bodies (LLM call), union frontmatter
+ *      canonical page path, merge bodies (LLM call), union frontmatter
  *      array fields (deterministic), rewrite every wikilink /
  *      `related:` reference / index.md entry across the wiki, and
  *      package up a result the caller writes to disk + backs up.
@@ -55,20 +61,35 @@ export interface EntitySummary {
 }
 
 export interface DuplicateGroup {
+  /** Two or more wiki-relative page paths, e.g. `wiki/entities/foo.md`.
+   *  Paths (not slugs) so two pages that share a basename stay
+   *  distinct. */
+  pages: string[]
+  /** Why the model believes these are duplicates. Short prose. */
+  reason: string
+  confidence: "high" | "medium" | "low"
+}
+
+/**
+ * Raw detector output (pre path-resolution). Slugs are what the LLM
+ * sees and emits; a single slug may map to several pages when two
+ * directories contain the same basename. Only used transiently inside
+ * detection — callers always get resolved `DuplicateGroup`s.
+ */
+export interface DetectorGroup {
   /** Two or more slugs from the input list. */
   slugs: string[]
-  /** Why the model believes these are duplicates. Short prose. */
   reason: string
   confidence: "high" | "medium" | "low"
 }
 
 export interface MergeRequest {
   /** Pages in the duplicate group, with their full content loaded. */
-  group: { slug: string; path: string; content: string }[]
-  /** Slug to keep. Must be one of group[].slug. The other pages
-   *  are deleted; their wikilinks/related entries get rewritten
+  group: { path: string; content: string }[]
+  /** Path of the page to keep. Must be one of group[].path. The other
+   *  pages are deleted; their wikilinks/related entries get rewritten
    *  to point here. */
-  canonicalSlug: string
+  canonicalPath: string
   /** Every other .md under the project's wiki/ tree. Used to
    *  rewrite cross-references when the merge replaces multiple
    *  pages with one. */
@@ -194,6 +215,7 @@ Rules:
 - "medium" = likely the same but context-dependent.
 - "low" = uncertain; user should review carefully.
 - Never invent slugs that aren't in the input.
+- The same slug can appear multiple times when separate pages share a basename (e.g. "amanda" exists at both wiki/entities/amanda.md and wiki/concepts/amanda.md). List each slug occurrence you believe is duplicated — each will resolve to its own page.
 - If no duplicates exist, output {"groups": []}.
 - Pages of different \`type\` (e.g. an entity and a concept) usually should NOT be grouped — only group across types when they're unambiguously the same thing.`
 
@@ -201,12 +223,14 @@ Rules:
  * Run the LLM duplicate-detector. The caller hands in summaries
  * (typically every entity + concept page in the wiki) and a
  * function that wraps an LLM call. Returns parsed, validated
- * groups — invalid entries (slugs not in the input, single-element
- * groups) are filtered out so the caller never sees garbage.
+ * groups resolved to wiki-relative page paths — invalid entries
+ * (slugs not in the input, single-element groups) are filtered
+ * out so the caller never sees garbage, and colliding basenames
+ * expand to one entry per page.
  *
  * Already-confirmed-not-duplicate groups passed in `notDuplicates`
- * are filtered out before returning so the same false positive
- * doesn't keep appearing on every run.
+ * (path-based) are filtered out before returning so the same false
+ * positive doesn't keep appearing on every run.
  */
 export async function detectDuplicateGroups(
   summaries: EntitySummary[],
@@ -220,21 +244,55 @@ export async function detectDuplicateGroups(
   const parsed = parseDetectorResponse(response)
 
   const validSlugs = new Set(summaries.map((s) => s.slug))
-  const notDupSet = new Set(
+  const raw = parsed
+    .map((g) => ({ ...g, slugs: g.slugs.filter((s) => validSlugs.has(s)) }))
+    .filter((g) => g.slugs.length >= 2)
+
+  const notDupKeys = new Set(
     (options.notDuplicates ?? []).map((g) => normalizeGroupKey(g)),
   )
 
-  return parsed
-    .map((g) => ({ ...g, slugs: g.slugs.filter((s) => validSlugs.has(s)) }))
-    .filter((g) => g.slugs.length >= 2)
-    .filter((g) => !notDupSet.has(normalizeGroupKey(g.slugs)))
+  return resolveDuplicateGroups(summaries, raw, { notDuplicateKeys: notDupKeys })
+}
+
+/**
+ * Turn raw slug-groups from the LLM into page-path groups, expanding
+ * every slug to all of its pages. A slug collision (the same basename
+ * under two directories) therefore yields one entry per page instead
+ * of silently collapsing to a single file — which is exactly the bug
+ * that made merges "succeed" without deleting anything.
+ */
+export function resolveDuplicateGroups(
+  summaries: EntitySummary[],
+  rawGroups: DetectorGroup[],
+  options: { notDuplicateKeys?: Set<string> } = {},
+): DuplicateGroup[] {
+  const slugToPaths = new Map<string, string[]>()
+  for (const s of summaries) {
+    const list = slugToPaths.get(s.slug)
+    if (list) list.push(s.path)
+    else slugToPaths.set(s.slug, [s.path])
+  }
+
+  const out: DuplicateGroup[] = []
+  for (const g of rawGroups) {
+    const seen = new Set<string>()
+    for (const slug of g.slugs) {
+      for (const path of slugToPaths.get(slug) ?? []) seen.add(path)
+    }
+    const pages = [...seen]
+    if (pages.length < 2) continue
+    if (options.notDuplicateKeys?.has(normalizeGroupKey(pages))) continue
+    out.push({ pages, reason: g.reason, confidence: g.confidence })
+  }
+  return out
 }
 
 function buildDetectorUserMessage(summaries: EntitySummary[]): string {
   const lines = summaries.map((s) => {
     const tagPart = s.tags.length > 0 ? ` [${s.tags.join(", ")}]` : ""
     const descPart = s.description ? ` — ${s.description}` : ""
-    return `- type=${s.type}, slug=${s.slug}, title=${JSON.stringify(s.title)}${tagPart}${descPart}`
+    return `- type=${s.type}, slug=${s.slug}, path=${s.path}, title=${JSON.stringify(s.title)}${tagPart}${descPart}`
   })
   return `## Wiki pages to scan (${summaries.length} entries)\n\n${lines.join("\n")}\n\nReturn duplicate groups as JSON only.`
 }
@@ -247,7 +305,7 @@ function buildDetectorUserMessage(summaries: EntitySummary[]): string {
  * — the caller treats "no duplicates found" identically to "LLM
  * output garbled".
  */
-export function parseDetectorResponse(raw: string): DuplicateGroup[] {
+export function parseDetectorResponse(raw: string): DetectorGroup[] {
   const jsonText = extractFirstJsonObject(raw)
   if (!jsonText) return []
   let parsed: unknown
@@ -260,7 +318,7 @@ export function parseDetectorResponse(raw: string): DuplicateGroup[] {
   const groupsRaw = (parsed as { groups?: unknown }).groups
   if (!Array.isArray(groupsRaw)) return []
 
-  const out: DuplicateGroup[] = []
+  const out: DetectorGroup[] = []
   for (const g of groupsRaw) {
     if (!g || typeof g !== "object") continue
     const obj = g as Record<string, unknown>
@@ -269,7 +327,7 @@ export function parseDetectorResponse(raw: string): DuplicateGroup[] {
       : []
     if (slugs.length < 2) continue
     const reason = typeof obj.reason === "string" ? obj.reason : ""
-    const confidence: DuplicateGroup["confidence"] =
+    const confidence: DetectorGroup["confidence"] =
       obj.confidence === "high" || obj.confidence === "medium"
         ? obj.confidence
         : "low"
@@ -350,15 +408,16 @@ export async function mergeDuplicateGroup(
   llmCall: DedupLlmCall,
   options: { signal?: AbortSignal; today?: () => string } = {},
 ): Promise<MergeResult> {
-  const canonical = req.group.find((p) => p.slug === req.canonicalSlug)
+  const canonical = req.group.find((p) => p.path === req.canonicalPath)
   if (!canonical) {
     throw new Error(
-      `canonicalSlug "${req.canonicalSlug}" is not in the group: ${req.group.map((p) => p.slug).join(", ")}`,
+      `canonicalPath "${req.canonicalPath}" is not in the group: ${req.group.map((p) => p.path).join(", ")}`,
     )
   }
   if (req.group.length < 2) {
     throw new Error("mergeDuplicateGroup requires at least 2 pages in the group")
   }
+  const canonicalSlug = slugFromPath(req.canonicalPath)
 
   // 1. LLM body merge
   const userMessage = buildMergerUserMessage(req.group)
@@ -380,11 +439,16 @@ export async function mergeDuplicateGroup(
 
   // 4. Cross-reference rewrites: every other wiki page that mentions
   //    a non-canonical slug needs its wikilinks / related entries
-  //    rewritten to the canonical.
+  //    rewritten to the canonical. Redirects are only established when
+  //    the two slugs actually differ — when a collision means the
+  //    non-canonical page shares the canonical's basename (e.g.
+  //    wiki/concepts/amanda.md vs wiki/entities/amanda.md), `[[amanda]]`
+  //    already targets the canonical slug and must NOT be rewritten.
   const slugRedirects = new Map<string, string>()
   for (const page of req.group) {
-    if (page.slug !== req.canonicalSlug) {
-      slugRedirects.set(page.slug, req.canonicalSlug)
+    const slug = slugFromPath(page.path)
+    if (page.path !== req.canonicalPath && slug !== canonicalSlug) {
+      slugRedirects.set(slug, canonicalSlug)
     }
   }
   const rewrites: MergeResult["rewrites"] = []
@@ -407,7 +471,7 @@ export async function mergeDuplicateGroup(
 
   // 6. Pages to delete: every group member except the canonical.
   const pagesToDelete = req.group
-    .filter((p) => p.slug !== req.canonicalSlug)
+    .filter((p) => p.path !== req.canonicalPath)
     .map((p) => p.path)
 
   return {
@@ -420,11 +484,11 @@ export async function mergeDuplicateGroup(
 }
 
 function buildMergerUserMessage(
-  group: { slug: string; content: string }[],
+  group: { path: string; content: string }[],
 ): string {
   const sections = group.map((p, i) => {
     return [
-      `## Page ${i + 1} (slug: ${p.slug})`,
+      `## Page ${i + 1} (path: ${p.path})`,
       "",
       p.content,
       "",
@@ -432,7 +496,7 @@ function buildMergerUserMessage(
   })
   return [
     `These ${group.length} wiki pages have been confirmed by the user to describe the same topic.`,
-    `Merge them into a single coherent page (the canonical slug will be "${group[0].slug}" or whichever the caller chose).`,
+    `Merge them into a single coherent page (the canonical path will be "${group[0].path}" or whichever the caller chose).`,
     "",
     sections.join("\n---\n\n"),
     "",
@@ -521,32 +585,55 @@ function defaultToday(): string {
 // ──────────────────────────────────────────────────────────────────
 
 /**
- * Remove entries for merged-away slugs from `wiki/index.md`.
+ * Remove entries for merged-away pages from `wiki/index.md`.
  * Index files are typically formatted as bullet / link lists
  * grouped by section. This is a CONSERVATIVE rewriter:
- *   - Removes any whole line that contains a markdown link or
- *     wikilink to a merged-away slug.
- *   - Preserves all other content verbatim (other sections,
- *     intros, the canonical entry).
+ *   - Removes any whole line that references a merged-away page by
+ *     path (`[X](concepts/amanda.md)`, `concepts/amanda.md`, …).
+ *   - Also removes lines that reference a merged-away page by bare
+ *     slug (`[[dpaos]]`, `dpaos.md`) — UNLESS `survivingSlug`
+ *     collides with that slug. When a duplicate basename survives
+ *     (wiki/entities/amanda.md kept, wiki/concepts/amanda.md merged
+ *     away), `[[amanda]]` is ambiguous and is left untouched.
+ *   - Preserves all other content verbatim (other sections, intros,
+ *     the canonical entry).
  * The caller (UI) shows the user a diff before writing so any
  * over-removal is visible.
  */
 export function rewriteIndexMd(
   content: string,
-  removedSlugs: Set<string>,
+  removedPaths: Set<string>,
+  survivingSlug?: string,
 ): string {
-  if (removedSlugs.size === 0) return content
+  if (removedPaths.size === 0) return content
   const lines = content.split("\n")
   const out: string[] = []
   for (const line of lines) {
-    if (lineRefersToSlug(line, removedSlugs)) continue
+    if (lineRefersToRemoved(line, removedPaths, survivingSlug)) continue
     out.push(line)
   }
   return out.join("\n")
 }
 
-function lineRefersToSlug(line: string, slugs: Set<string>): boolean {
-  for (const slug of slugs) {
+function lineRefersToRemoved(
+  line: string,
+  removedPaths: Set<string>,
+  survivingSlug: string | undefined,
+): boolean {
+  // 1. Path references — match the page regardless of slug collisions.
+  //    Strip a leading `wiki/` so both `concepts/amanda.md` and the
+  //    full `wiki/concepts/amanda.md` are caught.
+  for (const path of removedPaths) {
+    const matchable = path.replace(/^wiki\//, "")
+    const escaped = escapeRegex(matchable)
+    if (new RegExp(`\\([^)]*${escaped}\\)`).test(line)) return true
+    if (new RegExp(`\\b${escaped}\\b`).test(line)) return true
+  }
+  // 2. Slug references — only when the slug uniquely names the removed
+  //    page. If a surviving page shares the slug, skip (ambiguous).
+  for (const path of removedPaths) {
+    const slug = (path.split("/").pop() ?? "").replace(/\.md$/, "")
+    if (!slug || slug === survivingSlug) continue
     const escaped = escapeRegex(slug)
     // Wikilink form: [[slug]] or [[slug|alias]]
     if (new RegExp(`\\[\\[${escaped}(\\|[^\\]]*)?\\]\\]`).test(line)) return true

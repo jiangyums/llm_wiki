@@ -4,8 +4,10 @@
  * When the user reviews a candidate group and says "these are NOT
  * the same thing", we record the group so the next detector run
  * doesn't re-suggest it. Stored as a JSON array-of-arrays where
- * each inner array is one whitelisted group of slugs (lowercased,
- * sorted — see the canonical key logic in `dedup.ts`).
+ * each inner array is one whitelisted group of wiki-relative page
+ * paths (lowercased, sorted — see the canonical key logic in
+ * `dedup.ts`). Paths (not slugs) are the identity, so colliding
+ * basenames stay distinct.
  *
  * Lives next to ingest-cache.json / image-caption-cache.json /
  * lexical-graph.json (when added) — same `.llm-wiki/` directory,
@@ -30,7 +32,11 @@ export async function loadNotDuplicates(projectPath: string): Promise<string[][]
     if (!Array.isArray(parsed)) return []
     return parsed.filter(
       (g): g is string[] =>
-        Array.isArray(g) && g.every((s) => typeof s === "string"),
+        Array.isArray(g)
+        && g.every((s) => typeof s === "string")
+        // Legacy entries were bare slugs ("foo"); only path-based
+        // entries ("wiki/entities/foo.md") can participate now.
+        && g.every((s) => s.endsWith(".md")),
     )
   } catch {
     return []
@@ -46,23 +52,24 @@ export async function saveNotDuplicates(
 }
 
 /**
- * Add a group to the whitelist. Idempotent — if the same group
- * (in any order, any casing) is already present, this is a no-op.
+ * Add a group of page paths to the whitelist. Idempotent — if the
+ * same group (in any order, any casing) is already present, this is
+ * a no-op.
  */
 export async function addNotDuplicate(
   projectPath: string,
-  slugs: string[],
+  paths: string[],
 ): Promise<void> {
-  if (slugs.length < 2) return
+  if (paths.length < 2) return
   const list = await loadNotDuplicates(projectPath)
-  const normNew = canonicalKey(slugs)
+  const normNew = canonicalKey(paths)
   for (const existing of list) {
     if (canonicalKey(existing) === normNew) return // already there
   }
-  list.push([...slugs].sort())
+  list.push([...paths].sort())
   await saveNotDuplicates(projectPath, list)
 }
 
-function canonicalKey(slugs: string[]): string {
-  return [...slugs].map((s) => s.toLowerCase()).sort().join(",")
+function canonicalKey(paths: string[]): string {
+  return [...paths].map((s) => s.toLowerCase()).sort().join(",")
 }

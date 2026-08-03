@@ -215,7 +215,11 @@ describe("runDuplicateDetection embedding prefilter", () => {
     const result = await runDuplicateDetection("/project", cfg)
 
     expect(result).toEqual([
-      { slugs: ["foo", "bar"], reason: "same topic", confidence: "high" },
+      {
+        pages: ["wiki/entities/foo.md", "wiki/entities/bar.md"],
+        reason: "same topic",
+        confidence: "high",
+      },
     ])
     expect(mockCandidatePairs).toHaveBeenCalledOnce()
     const detectorUserMessage = mockStreamChat.mock.calls[0][1][1].content
@@ -266,7 +270,11 @@ describe("runDuplicateDetection embedding prefilter", () => {
     const result = await runDuplicateDetection("/project", cfg)
 
     expect(result).toEqual([
-      { slugs: ["foo", "bar"], reason: "same topic", confidence: "high" },
+      {
+        pages: ["wiki/entities/foo.md", "wiki/entities/bar.md"],
+        reason: "same topic",
+        confidence: "high",
+      },
     ])
     const detectorUserMessage = mockStreamChat.mock.calls[0][1][1].content
     expect(detectorUserMessage).toContain("slug=foo")
@@ -302,7 +310,9 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
   it("keeps the not-duplicates whitelist active on the prefiltered path", async () => {
     setupThreePageProject()
-    mockLoadNotDuplicates.mockResolvedValue([["foo", "bar"]])
+    mockLoadNotDuplicates.mockResolvedValue([
+      ["wiki/entities/foo.md", "wiki/entities/bar.md"],
+    ])
     setupEmbeddingConfig()
     mockCandidatePairs.mockResolvedValue([[FOO_REL, BAR_REL]])
     mockClusterByPairs.mockReturnValue([[FOO_REL, BAR_REL]])

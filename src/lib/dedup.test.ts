@@ -3,6 +3,7 @@ import {
   extractEntitySummary,
   detectDuplicateGroups,
   parseDetectorResponse,
+  resolveDuplicateGroups,
   mergeDuplicateGroup,
   rewriteCrossReferences,
   rewriteIndexMd,
@@ -152,7 +153,10 @@ describe("detectDuplicateGroups", () => {
       llm,
     )
     expect(result).toHaveLength(1)
-    expect(result[0].slugs).toEqual(["real-a", "real-b"])
+    expect(result[0].pages).toEqual([
+      "wiki/entities/real-a.md",
+      "wiki/entities/real-b.md",
+    ])
   })
 
   it("filters out groups already on the user's not-duplicates whitelist", async () => {
@@ -172,9 +176,11 @@ describe("detectDuplicateGroups", () => {
         summary("y", "Y"),
       ],
       llm,
-      { notDuplicates: [["foo", "bar"]] },
+      { notDuplicates: [["wiki/entities/foo.md", "wiki/entities/bar.md"]] },
     )
-    expect(result.map((g) => g.slugs.sort())).toEqual([["x", "y"]])
+    expect(result.map((g) => g.pages.sort())).toEqual([
+      ["wiki/entities/x.md", "wiki/entities/y.md"],
+    ])
   })
 
   it("treats whitelist entries case-insensitively and order-independently", async () => {
@@ -187,7 +193,7 @@ describe("detectDuplicateGroups", () => {
     const result = await detectDuplicateGroups(
       [summary("foo", "Foo"), summary("bar", "Bar")],
       llm,
-      { notDuplicates: [["BAR", "FOO"]] },
+      { notDuplicates: [["WIKI/ENTITIES/BAR.MD", "wiki/entities/foo.md"]] },
     )
     expect(result).toEqual([])
   })
@@ -215,6 +221,85 @@ describe("detectDuplicateGroups", () => {
     expect(userMsg).toContain('"Foo"')
     expect(userMsg).toContain("[t1, t2]")
     expect(userMsg).toContain("Short desc.")
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────
+// Stage 2: resolveDuplicateGroups (slug → page-path expansion)
+// ──────────────────────────────────────────────────────────────────
+
+describe("resolveDuplicateGroups", () => {
+  const summary = (slug: string, path: string, type = "entity"): EntitySummary => ({
+    slug,
+    path,
+    type,
+    title: slug,
+    tags: [],
+  })
+
+  it("maps slugs to their page paths", () => {
+    const summaries = [
+      summary("foo", "wiki/entities/foo.md"),
+      summary("bar", "wiki/entities/bar.md"),
+    ]
+    const out = resolveDuplicateGroups(summaries, [
+      { slugs: ["foo", "bar"], reason: "same", confidence: "high" },
+    ])
+    expect(out).toEqual([
+      {
+        pages: ["wiki/entities/foo.md", "wiki/entities/bar.md"],
+        reason: "same",
+        confidence: "high",
+      },
+    ])
+  })
+
+  it("expands a colliding slug into one entry per page", () => {
+    const summaries = [
+      summary("amanda", "wiki/entities/amanda.md", "entity"),
+      summary("amanda", "wiki/concepts/amanda.md", "concept"),
+      summary("foo", "wiki/entities/foo.md"),
+    ]
+    const out = resolveDuplicateGroups(summaries, [
+      { slugs: ["amanda", "foo"], reason: "same", confidence: "high" },
+    ])
+    expect(out).toHaveLength(1)
+    expect(out[0].pages).toEqual([
+      "wiki/entities/amanda.md",
+      "wiki/concepts/amanda.md",
+      "wiki/entities/foo.md",
+    ])
+  })
+
+  it("keeps a single colliding slug as a valid two-page group", () => {
+    const summaries = [
+      summary("amanda", "wiki/entities/amanda.md"),
+      summary("amanda", "wiki/concepts/amanda.md"),
+    ]
+    // One slug emitted, but it resolves to two distinct pages — the
+    // whole point of path-based identity.
+    const out = resolveDuplicateGroups(summaries, [
+      { slugs: ["amanda"], reason: "x", confidence: "high" },
+    ])
+    expect(out).toEqual([
+      {
+        pages: ["wiki/entities/amanda.md", "wiki/concepts/amanda.md"],
+        reason: "x",
+        confidence: "high",
+      },
+    ])
+  })
+
+  it("respects the path-based not-duplicates whitelist", () => {
+    const summaries = [
+      summary("foo", "wiki/entities/foo.md"),
+      summary("bar", "wiki/concepts/bar.md"),
+    ]
+    const keys = new Set(["wiki/concepts/bar.md,wiki/entities/foo.md"])
+    const out = resolveDuplicateGroups(summaries, [
+      { slugs: ["foo", "bar"], reason: "x", confidence: "high" },
+    ], { notDuplicateKeys: keys })
+    expect(out).toEqual([])
   })
 })
 
@@ -352,6 +437,34 @@ describe("rewriteIndexMd", () => {
     const input = "- [Foo](entities/foo.md)\n- [Bar](entities/bar.md)"
     expect(rewriteIndexMd(input, new Set())).toBe(input)
   })
+
+  it("collision: removes only the merged-away path's line, keeping the canonical", () => {
+    const input = [
+      "## Entities",
+      "- [[amanda]] — Amanda (entity)",
+      "- [Amanda](entities/amanda.md)",
+      "## Concepts",
+      "- [Amanda](concepts/amanda.md)",
+    ].join("\n")
+    // concepts/amanda.md is merged away; entities/amanda.md (slug "amanda")
+    // survives, so the ambiguous [[amanda]] line must NOT be removed.
+    const out = rewriteIndexMd(input, new Set(["wiki/concepts/amanda.md"]), "amanda")
+    expect(out).not.toContain("concepts/amanda.md")
+    expect(out).toContain("[[amanda]] — Amanda (entity)")
+    expect(out).toContain("[Amanda](entities/amanda.md)")
+  })
+
+  it("removes slug references when no surviving page shares the slug", () => {
+    const input = [
+      "## Entities",
+      "- [[dpaos]] — DPAOs",
+      "- [DPAO](entities/dpao.md)",
+    ].join("\n")
+    // dpaos merged into dpao (different slug) → [[dpaos]] is unambiguous.
+    const out = rewriteIndexMd(input, new Set(["wiki/entities/dpaos.md"]), "dpao")
+    expect(out).not.toContain("[[dpaos]]")
+    expect(out).toContain("[DPAO](entities/dpao.md)")
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────
@@ -361,28 +474,28 @@ describe("rewriteIndexMd", () => {
 describe("mergeDuplicateGroup", () => {
   const FIXED_TODAY = () => "2026-04-30"
 
-  it("throws when canonicalSlug isn't in the group", async () => {
+  it("throws when canonicalPath isn't in the group", async () => {
     await expect(
       mergeDuplicateGroup(
         {
           group: [
-            { slug: "a", path: "wiki/entities/a.md", content: PAGE("type: entity", "ax") },
-            { slug: "b", path: "wiki/entities/b.md", content: PAGE("type: entity", "bx") },
+            { path: "wiki/entities/a.md", content: PAGE("type: entity", "ax") },
+            { path: "wiki/entities/b.md", content: PAGE("type: entity", "bx") },
           ],
-          canonicalSlug: "z",
+          canonicalPath: "wiki/entities/z.md",
           otherWikiPages: [],
         },
         vi.fn(),
       ),
-    ).rejects.toThrow(/canonicalSlug/)
+    ).rejects.toThrow(/canonicalPath/)
   })
 
   it("throws when group has fewer than 2 pages", async () => {
     await expect(
       mergeDuplicateGroup(
         {
-          group: [{ slug: "a", path: "wiki/entities/a.md", content: PAGE("type: entity", "x") }],
-          canonicalSlug: "a",
+          group: [{ path: "wiki/entities/a.md", content: PAGE("type: entity", "x") }],
+          canonicalPath: "wiki/entities/a.md",
           otherWikiPages: [],
         },
         vi.fn(),
@@ -408,10 +521,10 @@ describe("mergeDuplicateGroup", () => {
     const result = await mergeDuplicateGroup(
       {
         group: [
-          { slug: "accumulibacter", path: "wiki/entities/accumulibacter.md", content: pageA },
-          { slug: "聚磷菌", path: "wiki/entities/聚磷菌.md", content: pageB },
+          { path: "wiki/entities/accumulibacter.md", content: pageA },
+          { path: "wiki/entities/聚磷菌.md", content: pageB },
         ],
-        canonicalSlug: "accumulibacter",
+        canonicalPath: "wiki/entities/accumulibacter.md",
         otherWikiPages: [],
       },
       llm,
@@ -461,10 +574,10 @@ describe("mergeDuplicateGroup", () => {
     const result = await mergeDuplicateGroup(
       {
         group: [
-          { slug: "a", path: "wiki/entities/a.md", content: pageA },
-          { slug: "b", path: "wiki/entities/b.md", content: pageB },
+          { path: "wiki/entities/a.md", content: pageA },
+          { path: "wiki/entities/b.md", content: pageB },
         ],
-        canonicalSlug: "a",
+        canonicalPath: "wiki/entities/a.md",
         otherWikiPages: [
           { path: "wiki/concepts/other.md", content: referencingPage },
         ],
@@ -494,10 +607,10 @@ describe("mergeDuplicateGroup", () => {
     const result = await mergeDuplicateGroup(
       {
         group: [
-          { slug: "a", path: "wiki/entities/a.md", content: PAGE("type: entity", "x") },
-          { slug: "b", path: "wiki/entities/b.md", content: PAGE("type: entity", "y") },
+          { path: "wiki/entities/a.md", content: PAGE("type: entity", "x") },
+          { path: "wiki/entities/b.md", content: PAGE("type: entity", "y") },
         ],
-        canonicalSlug: "a",
+        canonicalPath: "wiki/entities/a.md",
         otherWikiPages: [{ path: "wiki/concepts/irrelevant.md", content: irrelevant }],
       },
       llm,
@@ -517,10 +630,10 @@ describe("mergeDuplicateGroup", () => {
     const result = await mergeDuplicateGroup(
       {
         group: [
-          { slug: "a", path: "wiki/entities/a.md", content: pageA },
-          { slug: "b", path: "wiki/entities/b.md", content: pageB },
+          { path: "wiki/entities/a.md", content: pageA },
+          { path: "wiki/entities/b.md", content: pageB },
         ],
-        canonicalSlug: "a",
+        canonicalPath: "wiki/entities/a.md",
         otherWikiPages: [{ path: "wiki/concepts/ref.md", content: refOrig }],
       },
       llm,
@@ -537,5 +650,40 @@ describe("mergeDuplicateGroup", () => {
     // The backup content is the ORIGINAL, not the post-merge version
     const refBackup = result.backup.find((b) => b.path === "wiki/concepts/ref.md")
     expect(refBackup?.content).toBe(refOrig)
+  })
+
+  it("collision: deletes the sibling page but rewrites no wikilinks when slugs match", async () => {
+    // wiki/entities/amanda.md and wiki/concepts/amanda.md share the slug
+    // "amanda". Keeping the entity must delete the concept WITHOUT
+    // rewriting [[amanda]] (it already targets the canonical slug).
+    const entity = PAGE("type: entity\ntitle: Amanda", "Entity body")
+    const concept = PAGE("type: concept\ntitle: Amanda", "Concept body")
+    const ref = PAGE("type: concept\nrelated: [amanda]", "See [[amanda]].")
+    const llm = vi.fn().mockResolvedValue(
+      PAGE("type: entity\ntitle: Amanda", "Merged body"),
+    )
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { path: "wiki/entities/amanda.md", content: entity },
+          { path: "wiki/concepts/amanda.md", content: concept },
+        ],
+        canonicalPath: "wiki/entities/amanda.md",
+        otherWikiPages: [{ path: "wiki/concepts/other.md", content: ref }],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(result.canonicalPath).toBe("wiki/entities/amanda.md")
+    expect(result.pagesToDelete).toEqual(["wiki/concepts/amanda.md"])
+    // The colliding slug must NOT be rewritten — [[amanda]] is canonical already.
+    expect(result.rewrites).toEqual([])
+    // Backup still snapshots both group members + nothing else.
+    expect(result.backup.map((b) => b.path).sort()).toEqual([
+      "wiki/concepts/amanda.md",
+      "wiki/entities/amanda.md",
+    ])
   })
 })

@@ -61,6 +61,23 @@ import {
 import { loadNotDuplicates } from "./dedup-storage"
 
 /**
+ * Append a line to the project's dedup diagnostic log. Mirrors the
+ * ingest pipeline's `logDiag` (read-append-write); failures to log
+ * are silent. Kept best-effort because a logging failure must never
+ * take down a merge.
+ */
+async function logDedupDiag(projectPath: string, message: string): Promise<void> {
+  try {
+    const logPath = `${projectPath}/.llm-wiki/dedup-diag.log`
+    const timestamp = new Date().toISOString().replace("T", " ").substring(0, 19)
+    const existing = await readFile(logPath).catch(() => "")
+    await writeFile(logPath, existing + `[${timestamp}] ${message}\n`)
+  } catch {
+    // non-critical
+  }
+}
+
+/**
  * Wrap streamChat into the (system, user, signal) → string shape
  * the dedup module expects. Same pattern page-merge uses — keeps
  * the algorithm modules free of any LlmConfig knowledge.
@@ -315,7 +332,7 @@ function uniqueDuplicateGroups(groups: DuplicateGroup[]): DuplicateGroup[] {
   const seen = new Set<string>()
   const out: DuplicateGroup[] = []
   for (const group of groups) {
-    const key = group.slugs.map((slug) => slug.toLowerCase()).sort().join("\t")
+    const key = group.pages.map((path) => path.toLowerCase()).sort().join("\t")
     if (seen.has(key)) continue
     seen.add(key)
     out.push(group)
@@ -329,17 +346,17 @@ function filterWhitelistedPairs(
   notDuplicates: string[][],
 ): CandidatePair[] {
   if (notDuplicates.length === 0) return pairs
-  const notDupSet = new Set(notDuplicates.map(normalizeSlugGroupKey))
+  const notDupSet = new Set(notDuplicates.map(normalizePathGroupKey))
   return pairs.filter(([a, b]) => {
-    const left = summaryByPath.get(a)?.slug
-    const right = summaryByPath.get(b)?.slug
+    const left = summaryByPath.get(a)?.path
+    const right = summaryByPath.get(b)?.path
     if (!left || !right) return true
-    return !notDupSet.has(normalizeSlugGroupKey([left, right]))
+    return !notDupSet.has(normalizePathGroupKey([left, right]))
   })
 }
 
-function normalizeSlugGroupKey(slugs: readonly string[]): string {
-  return slugs.map((slug) => slug.toLowerCase()).sort().join("\t")
+function normalizePathGroupKey(paths: readonly string[]): string {
+  return paths.map((path) => path.toLowerCase()).sort().join("\t")
 }
 
 function isAbortError(err: unknown): boolean {
@@ -371,34 +388,26 @@ function isEmbeddingCoverageError(err: unknown): boolean {
 export async function executeMerge(
   projectPath: string,
   group: DuplicateGroup,
-  canonicalSlug: string,
+  canonicalPath: string,
   llmConfig: LlmConfig,
   options: { signal?: AbortSignal } = {},
 ): Promise<MergeResult> {
   const pp = normalizePath(projectPath)
 
-  // 1. Resolve each group slug to its actual on-disk path + content
+  // 1. Resolve each group page to its content by wiki-relative path.
+  //    Direct path lookup (no slug map) keeps colliding basenames
+  //    distinct — each entry points at exactly one file.
   const allPages = await loadAllWikiPages(pp)
-  const pathBySlug = new Map<string, string>()
-  for (const p of allPages) {
-    const base = p.path.split("/").pop() ?? ""
-    if (base.endsWith(".md")) {
-      pathBySlug.set(base.slice(0, -3), p.path)
-    }
-  }
-  const groupPages: { slug: string; path: string; content: string }[] = []
-  for (const slug of group.slugs) {
-    const relPath = pathBySlug.get(slug)
-    if (!relPath) {
+  const byPath = new Map(allPages.map((p) => [p.path, p]))
+  const groupPages: { path: string; content: string }[] = []
+  for (const relPath of group.pages) {
+    const page = byPath.get(relPath)
+    if (!page) {
       throw new Error(
-        `Slug "${slug}" not found on disk — was the page deleted between detection and merge?`,
+        `Page "${relPath}" not found on disk — was the page deleted between detection and merge?`,
       )
     }
-    const page = allPages.find((p) => p.path === relPath)
-    if (!page) {
-      throw new Error(`Internal: page lookup miss for ${relPath}`)
-    }
-    groupPages.push({ slug, path: relPath, content: page.content })
+    groupPages.push({ path: relPath, content: page.content })
   }
 
   const groupPaths = new Set(groupPages.map((p) => p.path))
@@ -411,7 +420,7 @@ export async function executeMerge(
   const result = await mergeDuplicateGroup(
     {
       group: groupPages,
-      canonicalSlug,
+      canonicalPath,
       otherWikiPages: otherPages,
     },
     llm,
@@ -450,12 +459,21 @@ export async function executeMerge(
   const indexPath = `${pp}/wiki/index.md`
   const indexEntry = allPages.find((p) => p.path === "wiki/index.md")
   if (indexEntry) {
-    const removed = new Set(
-      group.slugs.filter((s) => s !== canonicalSlug),
-    )
-    const rewritten = rewriteIndexMd(indexEntry.content, removed)
+    const removed = new Set(group.pages.filter((p) => p !== canonicalPath))
+    const survivingSlug = (canonicalPath.split("/").pop() ?? "").replace(/\.md$/, "")
+    const rewritten = rewriteIndexMd(indexEntry.content, removed, survivingSlug)
     if (rewritten !== indexEntry.content) {
-      await writeFile(indexPath, rewritten)
+      try {
+        await writeFile(indexPath, rewritten)
+      } catch (err) {
+        await logDedupDiag(
+          pp,
+          `index.md rewrite write failed for group [${group.pages.join(", ")}] → ${canonicalPath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+        throw err
+      }
     }
   }
 

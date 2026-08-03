@@ -30,7 +30,7 @@ export interface DedupTask {
   id: string
   projectId: string
   group: DuplicateGroup
-  canonicalSlug: string
+  canonicalPath: string
   status: "pending" | "processing" | "done" | "failed"
   addedAt: number
   error: string | null
@@ -81,6 +81,23 @@ async function loadQueue(
   }
 }
 
+/**
+ * True for tasks that use path-based identity (`group.pages` +
+ * `canonicalPath`). Anything else is a pre-refactor slug-based task
+ * that can't be resolved to files safely and gets dropped on restore.
+ */
+function isPathBasedTask(t: unknown): t is DedupTask {
+  const task = t as Partial<DedupTask> | null
+  if (!task || typeof task !== "object") return false
+  const pages = (task as { group?: { pages?: unknown } }).group?.pages
+  return (
+    Array.isArray(pages)
+    && pages.length >= 2
+    && pages.every((p) => typeof p === "string")
+    && typeof task.canonicalPath === "string"
+  )
+}
+
 // ── Queue Operations ──────────────────────────────────────────────────────
 
 function generateId(): string {
@@ -90,21 +107,22 @@ function generateId(): string {
 /**
  * Stable key for matching a queued task to a UI card. Order-independent
  * lowercase join — same shape used by dedup-storage's canonical key.
+ * Operates on wiki-relative page paths.
  */
-export function groupKey(slugs: readonly string[]): string {
-  return [...slugs].map((s) => s.toLowerCase()).sort().join(",")
+export function groupKey(paths: readonly string[]): string {
+  return [...paths].map((s) => s.toLowerCase()).sort().join(",")
 }
 
 /**
  * Add a merge to the queue. The project MUST be the currently-active
  * project. Returns the new task's id. Idempotent on the same group:
  * if there's already a pending/processing/failed task for the same
- * slug-set, the existing id is returned instead of a duplicate.
+ * page-set, the existing id is returned instead of a duplicate.
  */
 export async function enqueueMerge(
   projectId: string,
   group: DuplicateGroup,
-  canonicalSlug: string,
+  canonicalPath: string,
 ): Promise<string> {
   if (!currentProjectId || currentProjectId !== projectId) {
     throw new Error(
@@ -112,12 +130,12 @@ export async function enqueueMerge(
     )
   }
 
-  const key = groupKey(group.slugs)
+  const key = groupKey(group.pages)
   const existing = queue.find(
     (t) =>
       t.projectId === projectId &&
       t.status !== "done" &&
-      groupKey(t.group.slugs) === key,
+      groupKey(t.group.pages) === key,
   )
   if (existing) {
     restoredPausedTaskIds.delete(existing.id)
@@ -135,7 +153,7 @@ export async function enqueueMerge(
     id: generateId(),
     projectId,
     group,
-    canonicalSlug,
+    canonicalPath,
     status: "pending",
     addedAt: Date.now(),
     error: null,
@@ -292,15 +310,27 @@ export async function restoreQueue(
     )
   }
 
+  // Tasks persisted before the path-identity refactor stored slug-sets
+  // and a canonicalSlug. They can't be resolved to on-disk files
+  // reliably (a duplicate basename was ambiguous), so they're dropped
+  // rather than risk another merge that deletes nothing.
+  const valid = mine.filter(isPathBasedTask)
+  const droppedLegacy = mine.length - valid.length
+  if (droppedLegacy > 0) {
+    console.warn(
+      `[Dedup Queue] Dropped ${droppedLegacy} legacy-format merge task(s) during restore (path-based page identity required)`,
+    )
+  }
+
   let restored = 0
-  for (const task of mine) {
+  for (const task of valid) {
     if (task.status === "processing") {
       task.status = "pending"
       restored++
     }
   }
 
-  queue = mine
+  queue = valid
   restoredPausedTaskIds = new Set(
     queue
       .filter((t) => t.status === "pending")
@@ -360,13 +390,13 @@ async function processNext(projectId: string): Promise<void> {
   }
 
   console.log(
-    `[Dedup Queue] Processing: merge ${next.group.slugs.join(",")} → ${next.canonicalSlug}`,
+    `[Dedup Queue] Processing: merge ${next.group.pages.join(",")} → ${next.canonicalPath}`,
   )
 
   currentAbortController = new AbortController()
 
   try {
-    await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, {
+    await executeMerge(pp, next.group, next.canonicalPath, llmConfig, {
       signal: currentAbortController.signal,
     })
     if (currentProjectId !== projectId) return
@@ -378,7 +408,7 @@ async function processNext(projectId: string): Promise<void> {
     // Tell the rest of the app the wiki tree changed.
     useWikiStore.getState().bumpDataVersion()
 
-    console.log(`[Dedup Queue] Done: ${next.group.slugs.join(",")}`)
+    console.log(`[Dedup Queue] Done: ${next.group.pages.join(",")}`)
   } catch (err) {
     if (currentProjectId !== projectId) return
     currentAbortController = null
@@ -389,12 +419,12 @@ async function processNext(projectId: string): Promise<void> {
     if (next.retryCount >= MAX_RETRIES) {
       next.status = "failed"
       console.log(
-        `[Dedup Queue] Failed (${next.retryCount}x): ${next.group.slugs.join(",")} — ${message}`,
+        `[Dedup Queue] Failed (${next.retryCount}x): ${next.group.pages.join(",")} — ${message}`,
       )
     } else {
       next.status = "pending"
       console.log(
-        `[Dedup Queue] Error (retry ${next.retryCount}/${MAX_RETRIES}): ${next.group.slugs.join(",")} — ${message}`,
+        `[Dedup Queue] Error (retry ${next.retryCount}/${MAX_RETRIES}): ${next.group.pages.join(",")} — ${message}`,
       )
     }
     await saveQueue(pp)
