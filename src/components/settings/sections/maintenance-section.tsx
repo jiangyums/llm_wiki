@@ -13,6 +13,8 @@ import {
   Clock,
   Archive,
   ListRestart,
+  FileText,
+  X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -32,8 +34,14 @@ import {
 } from "@/lib/dedup-queue"
 import type { DuplicateGroup } from "@/lib/dedup"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
-import { openProject } from "@/commands/fs"
+import { openProject, readFile } from "@/commands/fs"
 import { addToRecentProjects } from "@/lib/project-store"
+import { normalizePath } from "@/lib/path-utils"
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+} from "@/components/ui/dialog"
 
 interface GroupUiEntry {
   group: DuplicateGroup
@@ -73,6 +81,10 @@ export function MaintenanceSection() {
   const [groups, setGroups] = useState<GroupUiEntry[]>([])
   const [scanCompleted, setScanCompleted] = useState(false)
   const [scanProgress, setScanProgress] = useState<DedupScanStage | null>(null)
+  // Detail popup state: map of page path → file content. Multiple
+  // popups can be open simultaneously for side-by-side comparison.
+  const [detailPopups, setDetailPopups] = useState<Map<string, string>>(new Map())
+  const [detailLoading, setDetailLoading] = useState<Set<string>>(new Set())
   const [projectToolStatus, setProjectToolStatus] = useState<string | null>(null)
   const [projectToolBusy, setProjectToolBusy] = useState(false)
 
@@ -221,6 +233,52 @@ export function MaintenanceSection() {
     },
     [project, groups],
   )
+
+  const handleShowDetail = useCallback(async (path: string) => {
+    if (!project) return
+    if (detailPopups.has(path)) return // already open
+    setDetailLoading((prev) => new Set(prev).add(path))
+    try {
+      const pp = normalizePath(project.path)
+      const content = await readFile(`${pp}/${path}`)
+      setDetailPopups((prev) => new Map(prev).set(path, content))
+    } catch (err) {
+      setDetailPopups((prev) => new Map(prev).set(path, `[Error loading page: ${err}]`))
+    } finally {
+      setDetailLoading((prev) => {
+        const next = new Set(prev)
+        next.delete(path)
+        return next
+      })
+    }
+  }, [project, detailPopups])
+
+  const handleCloseDetail = useCallback((path: string) => {
+    setDetailPopups((prev) => {
+      const next = new Map(prev)
+      next.delete(path)
+      return next
+    })
+  }, [])
+
+  const handleRemoveFromGroup = useCallback((idx: number, pathToRemove: string) => {
+    setGroups((prev) => {
+      const entry = { ...prev[idx] }
+      const group = { ...entry.group }
+      group.pages = group.pages.filter((p) => p !== pathToRemove)
+      if (group.pages.length < 2) {
+        // Group becomes invalid — remove it entirely
+        return prev.filter((_, i) => i !== idx)
+      }
+      entry.group = group
+      if (entry.canonicalPath === pathToRemove) {
+        entry.canonicalPath = group.pages[0]
+      }
+      const updated = [...prev]
+      updated[idx] = entry
+      return updated
+    })
+  }, [])
 
   // Drive each card's status from the queue.
   // - Card not in queue + not skipped → idle, can merge / dismiss
@@ -436,6 +494,17 @@ export function MaintenanceSection() {
         pendingPositionByTaskId={pendingPositionByTaskId}
       />
 
+      {/* Detail popups — one per open page, allow multiple for comparison */}
+      {project && [...detailPopups.keys()].map((path) => (
+        <PageDetailPopup
+          key={path}
+          path={path}
+          content={detailPopups.get(path) ?? ""}
+          loading={detailLoading.has(path)}
+          onClose={() => handleCloseDetail(path)}
+        />
+      ))}
+
       {groups.map((entry, idx) => {
         const mergedKey = groupKey(entry.group.pages)
         // A merge that already completed (observed in a previous tick,
@@ -460,10 +529,48 @@ export function MaintenanceSection() {
             onCancel={() => task && void handleCancel(task.id)}
             onRetry={() => task && void handleRetry(task.id)}
             onNotDuplicate={() => void handleNotDuplicate(idx)}
+            onShowDetail={(path) => void handleShowDetail(path)}
+            onRemoveFromGroup={(path) => void handleRemoveFromGroup(idx, path)}
           />
         )
       })}
     </div>
+  )
+}
+
+// ── Page detail popup ──────────────────────────────────────────────────────
+
+interface PageDetailPopupProps {
+  path: string
+  content: string
+  loading: boolean
+  onClose: () => void
+}
+
+function PageDetailPopup({ path, content, loading, onClose }: PageDetailPopupProps) {
+  const { t } = useTranslation()
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-w-2xl max-h-[80vh] overflow-auto">
+        <DialogTitle>
+          <code className="font-mono text-xs font-normal">{path}</code>
+        </DialogTitle>
+        <div className="mt-2 max-h-[60vh] overflow-auto">
+          {loading ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {t("settings.sections.maintenance.dedup.loadingPage", {
+                defaultValue: "Loading page…",
+              })}
+            </div>
+          ) : (
+            <pre className="whitespace-pre-wrap break-all rounded bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-foreground">
+              {content}
+            </pre>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -648,6 +755,8 @@ interface CardProps {
   onCancel: () => void
   onRetry: () => void
   onNotDuplicate: () => void
+  onShowDetail: (path: string) => void
+  onRemoveFromGroup: (path: string) => void
 }
 
 function DuplicateGroupCard({
@@ -659,6 +768,8 @@ function DuplicateGroupCard({
   onCancel,
   onRetry,
   onNotDuplicate,
+  onShowDetail,
+  onRemoveFromGroup,
 }: CardProps) {
   const { t } = useTranslation()
   const { group, canonicalPath, skipped } = entry
@@ -715,9 +826,9 @@ function DuplicateGroupCard({
               })}
             </Label>
             {group.pages.map((path) => (
-              <label
+              <div
                 key={path}
-                className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-accent"
+                className="flex items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-accent"
               >
                 <input
                   type="radio"
@@ -726,13 +837,31 @@ function DuplicateGroupCard({
                   onChange={() => onCanonicalChange(path)}
                   disabled={inFlight}
                 />
-                <span className="flex min-w-0 items-center gap-1.5">
+                <span className="flex min-w-0 flex-1 items-center gap-1.5">
                   <code className="truncate font-mono text-xs">{path}</code>
                   <span className="shrink-0 rounded bg-muted px-1 py-px text-[10px] font-semibold uppercase text-muted-foreground">
                     {typeFromPath(path)}
                   </span>
                 </span>
-              </label>
+                <button
+                  type="button"
+                  onClick={() => onShowDetail(path)}
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  title={t("settings.sections.maintenance.dedup.pageDetail", { defaultValue: "View page" })}
+                  disabled={inFlight}
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onRemoveFromGroup(path)}
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-600"
+                  title={t("settings.sections.maintenance.dedup.removeFromGroup", { defaultValue: "Remove from group" })}
+                  disabled={inFlight}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
             ))}
           </div>
 

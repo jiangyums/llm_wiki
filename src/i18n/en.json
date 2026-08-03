@@ -866,6 +866,9 @@
           "restoredBacklog": "These merge tasks were restored from the previous session and are paused to avoid unexpected LLM usage.",
           "resumeRestored": "Resume merges",
           "notDuplicates": "Not duplicates",
+          "pageDetail": "View page",
+          "removeFromGroup": "Remove from group",
+          "loadingPage": "Loading page…",
           "merged": "Merged",
           "skipped": "Marked not duplicates"
         }

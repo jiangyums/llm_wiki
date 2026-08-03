@@ -866,6 +866,9 @@
           "restoredBacklog": "这些合并任务由上次会话恢复，当前已暂停，以免意外消耗 LLM 配额。",
           "resumeRestored": "继续合并",
           "notDuplicates": "不是重复",
+          "pageDetail": "查看页面",
+          "removeFromGroup": "从组中移除",
+          "loadingPage": "正在加载页面…",
           "merged": "已合并",
           "skipped": "已标记为不重复"
         }
