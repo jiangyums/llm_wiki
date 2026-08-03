@@ -545,34 +545,29 @@ interface PageDetailPopupProps {
 function PageDetailPopup({ path, content, loading, onClose }: PageDetailPopupProps) {
   const { t } = useTranslation()
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[10vh]">
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/10" onClick={onClose} />
-      {/* Panel */}
-      <div className="relative z-10 w-full max-w-2xl max-h-[75vh] overflow-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 shadow-lg">
-        <div className="flex items-center justify-between gap-2 mb-3">
-          <code className="truncate font-mono text-xs">{path}</code>
-          <button
-            onClick={onClose}
-            className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="max-h-[60vh] overflow-auto">
-          {loading ? (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {t("settings.sections.maintenance.dedup.loadingPage", {
-                defaultValue: "Loading page…",
-              })}
-            </div>
-          ) : (
-            <pre className="whitespace-pre-wrap break-all rounded bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-foreground">
-              {content}
-            </pre>
-          )}
-        </div>
+    <div className="fixed bottom-4 right-4 z-50 w-[42rem] max-h-[80vh] overflow-auto rounded-xl border bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 shadow-lg">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <code className="truncate font-mono text-xs">{path}</code>
+        <button
+          onClick={onClose}
+          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="max-h-[65vh] overflow-auto">
+        {loading ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {t("settings.sections.maintenance.dedup.loadingPage", {
+              defaultValue: "Loading page…",
+            })}
+          </div>
+        ) : (
+          <pre className="whitespace-pre-wrap break-all rounded bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-foreground">
+            {content}
+          </pre>
+        )}
       </div>
     </div>
   )
