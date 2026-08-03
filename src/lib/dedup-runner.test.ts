@@ -51,7 +51,7 @@ vi.mock("@/lib/dedup_embedding", () => ({
   },
 }))
 
-import { buildDedupLlmCall, runDuplicateDetection } from "./dedup-runner"
+import { buildDedupLlmCall, runDuplicateDetection, type DedupScanStage } from "./dedup-runner"
 import type { LlmConfig } from "@/stores/wiki-store"
 
 const cfg: LlmConfig = {
@@ -334,5 +334,66 @@ describe("runDuplicateDetection embedding prefilter", () => {
     await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }))
       .rejects.toThrow(/cancelled/i)
     expect(mockStreamChat).not.toHaveBeenCalled()
+  })
+})
+
+describe("runDuplicateDetection progress", () => {
+  it("reports reading stage progress for each page on the fallback path", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false) // no embedding → direct LLM scan
+    mockDetectorGroup()
+
+    const events: DedupScanStage[] = []
+    const onProgress = (p: DedupScanStage) => { events.push(p) }
+
+    await runDuplicateDetection("/project", cfg, { onProgress })
+
+    const reading = events.filter((e) => e.stage === "reading")
+    expect(reading).toEqual([
+      { stage: "reading", index: 1, total: 3 },
+      { stage: "reading", index: 2, total: 3 },
+      { stage: "reading", index: 3, total: 3 },
+    ])
+
+    const detecting = events.filter((e) => e.stage === "detecting")
+    expect(detecting).toEqual([
+      { stage: "detecting", index: 1, total: 1 },
+    ])
+  })
+
+  it("reports reading and detecting stage progress on the prefilter path", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([
+      ["wiki/entities/foo.md", "wiki/entities/bar.md"],
+      ["wiki/entities/bar.md", "wiki/entities/baz.md"],
+    ])
+    mockClusterByPairs.mockReturnValue([["wiki/entities/foo.md", "wiki/entities/bar.md"]])
+    mockDetectorGroup()
+
+    const events: DedupScanStage[] = []
+    const onProgress = (p: DedupScanStage) => { events.push(p) }
+
+    await runDuplicateDetection("/project", cfg, { onProgress })
+
+    const reading = events.filter((e) => e.stage === "reading")
+    expect(reading.length).toBe(3)
+    expect(reading[0]).toEqual({ stage: "reading", index: 1, total: 3 })
+    expect(reading[2]).toEqual({ stage: "reading", index: 3, total: 3 })
+
+    const detecting = events.filter((e) => e.stage === "detecting")
+    expect(detecting.length).toBeGreaterThanOrEqual(1)
+    expect(detecting[0].stage).toBe("detecting")
+  })
+
+  it("does not call onProgress when not provided", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorGroup()
+
+    await expect(runDuplicateDetection("/project", cfg)).resolves.toBeDefined()
   })
 })
