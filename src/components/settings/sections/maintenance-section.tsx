@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { useWikiStore } from "@/stores/wiki-store"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
-import { runDuplicateDetection } from "@/lib/dedup-runner"
+import { runDuplicateDetection, type DedupScanStage } from "@/lib/dedup-runner"
 import { addNotDuplicate } from "@/lib/dedup-storage"
 import {
   enqueueMerge,
@@ -72,6 +72,7 @@ export function MaintenanceSection() {
   const [scanError, setScanError] = useState<string | null>(null)
   const [groups, setGroups] = useState<GroupUiEntry[]>([])
   const [scanCompleted, setScanCompleted] = useState(false)
+  const [scanProgress, setScanProgress] = useState<DedupScanStage | null>(null)
   const [projectToolStatus, setProjectToolStatus] = useState<string | null>(null)
   const [projectToolBusy, setProjectToolBusy] = useState(false)
 
@@ -135,8 +136,11 @@ export function MaintenanceSection() {
     setScanError(null)
     setGroups([])
     setScanCompleted(false)
+    setScanProgress(null)
     try {
-      const detected = await runDuplicateDetection(project.path, llmConfig)
+      const detected = await runDuplicateDetection(project.path, llmConfig, {
+        onProgress: (p) => setScanProgress(p),
+      })
       setGroups(
         detected.map((g) => ({
           group: g,
@@ -149,6 +153,7 @@ export function MaintenanceSection() {
       setScanError(err instanceof Error ? err.message : String(err))
     } finally {
       setScanning(false)
+      setScanProgress(null)
     }
   }, [project, llmConfig])
 
@@ -362,6 +367,39 @@ export function MaintenanceSection() {
             })
           )}
         </Button>
+
+        {scanning && scanProgress && (
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              {scanProgress.stage === "reading" &&
+                t("settings.sections.maintenance.dedup.scanProgress.reading", {
+                  defaultValue: "Reading pages {{n}}/{{total}}",
+                  n: scanProgress.index,
+                  total: scanProgress.total,
+                })}
+              {scanProgress.stage === "embedding" &&
+                t("settings.sections.maintenance.dedup.scanProgress.embedding", {
+                  defaultValue: "Generating embeddings {{n}}/{{total}}",
+                  n: scanProgress.index,
+                  total: scanProgress.total,
+                })}
+              {scanProgress.stage === "detecting" &&
+                t("settings.sections.maintenance.dedup.scanProgress.detecting", {
+                  defaultValue: "Detecting groups {{n}}/{{total}}",
+                  n: scanProgress.index,
+                  total: scanProgress.total,
+                })}
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-300"
+                style={{
+                  width: `${Math.round((scanProgress.index / scanProgress.total) * 100)}%`,
+                }}
+              />
+            </div>
+          </div>
+        )}
 
         {scanError && (
           <div className="flex items-start gap-1.5 rounded border border-rose-500/40 bg-rose-500/5 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-400">

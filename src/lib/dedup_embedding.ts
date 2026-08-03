@@ -33,6 +33,11 @@ export interface CandidateOptions {
    * Default 1500 chars (matches chunker default).
    */
   textBudgetChars?: number
+  /**
+   * Called after each page is embedded, with (index, total) 1-based.
+   * Optional — progress reporting doesn't affect the result.
+   */
+  onProgress?: (index: number, total: number) => void
 }
 
 export type CandidatePair = readonly [string, string]
@@ -86,16 +91,17 @@ export function pageToEmbeddingText(page: Page, budget = 1500): string {
 export async function embedPages(
   pages: Page[],
   cfg: EmbeddingConfig,
-  opts: { signal?: AbortSignal; textBudgetChars?: number } = {},
+  opts: { signal?: AbortSignal; textBudgetChars?: number; onProgress?: (index: number, total: number) => void } = {},
 ): Promise<Map<string, number[] | null>> {
   const out = new Map<string, number[] | null>()
   const budget = opts.textBudgetChars ?? 1500
-  for (const p of pages) {
+  for (let i = 0; i < pages.length; i++) {
     throwIfAborted(opts.signal)
-    const text = pageToEmbeddingText(p, budget)
+    const text = pageToEmbeddingText(pages[i], budget)
     const vec = await fetchEmbedding(text, cfg)
     throwIfAborted(opts.signal)
-    out.set(p.id, vec)
+    out.set(pages[i].id, vec)
+    opts.onProgress?.(i + 1, pages.length)
   }
   return out
 }

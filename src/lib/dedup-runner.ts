@@ -60,6 +60,19 @@ import {
 } from "./dedup"
 import { loadNotDuplicates } from "./dedup-storage"
 
+// ── Progress reporting ─────────────────────────────────────────────────────
+
+export type DedupScanStage =
+  | { stage: "reading"; index: number; total: number }
+  | { stage: "embedding"; index: number; total: number }
+  | { stage: "detecting"; index: number; total: number }
+
+export interface DedupScanOptions {
+  signal?: AbortSignal
+  /** Called after each progress-relevant step in the scan pipeline. */
+  onProgress?: (p: DedupScanStage) => void
+}
+
 /**
  * Append a line to the project's dedup diagnostic log. Mirrors the
  * ingest pipeline's `logDiag` (read-append-write); failures to log
@@ -160,21 +173,32 @@ function toWikiRelative(projectPath: string, absPath: string): string {
  */
 export async function loadAllEntitySummaries(
   projectPath: string,
+  onReading?: (index: number, total: number) => void,
 ): Promise<EntitySummary[]> {
   const pp = normalizePath(projectPath)
   const tree = await listDirectory(pp)
-  const out: EntitySummary[] = []
+
+  // Pre-count so progress reporting knows the total.
+  const allNodes: FileNode[] = []
   for (const prefix of ["wiki/entities", "wiki/concepts"]) {
     for (const node of walkMd(tree, prefix)) {
-      try {
-        const content = await readFile(node.path)
-        const rel = toWikiRelative(pp, node.path)
-        const summary = extractEntitySummary(rel, content)
-        if (summary) out.push(summary)
-      } catch {
-        // best-effort — skip unreadable pages
-      }
+      allNodes.push(node)
     }
+  }
+
+  const total = allNodes.length
+  const out: EntitySummary[] = []
+  for (let i = 0; i < total; i++) {
+    const node = allNodes[i]
+    try {
+      const content = await readFile(node.path)
+      const rel = toWikiRelative(pp, node.path)
+      const summary = extractEntitySummary(rel, content)
+      if (summary) out.push(summary)
+    } catch {
+      // best-effort — skip unreadable pages
+    }
+    onReading?.(i + 1, total)
   }
   return out
 }
@@ -206,9 +230,11 @@ export async function loadAllWikiPages(
 export async function runDuplicateDetection(
   projectPath: string,
   llmConfig: LlmConfig,
-  options: { signal?: AbortSignal } = {},
+  options: DedupScanOptions = {},
 ): Promise<DuplicateGroup[]> {
-  const summaries = await loadAllEntitySummaries(projectPath)
+  const onProgress = options.onProgress
+  const onReading = onProgress ? (i: number, t: number) => onProgress({ stage: "reading", index: i, total: t }) : undefined
+  const summaries = await loadAllEntitySummaries(projectPath, onReading)
   if (summaries.length < 2) return []
   const notDup = await loadNotDuplicates(projectPath)
   const llm = buildDedupLlmCall(llmConfig, DEDUP_DETECTION_MAX_TOKENS)
@@ -225,6 +251,7 @@ export async function runDuplicateDetection(
         {
           signal: options.signal,
           notDuplicates: notDup,
+          onProgress,
         },
       )
     } catch (err) {
@@ -237,6 +264,7 @@ export async function runDuplicateDetection(
     }
   }
 
+  onProgress?.({ stage: "detecting", index: 1, total: 1 })
   return detectDuplicateGroups(summaries, llm, {
     signal: options.signal,
     notDuplicates: notDup,
@@ -247,14 +275,16 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
   summaries: EntitySummary[],
   embeddingConfig: EmbeddingConfig,
   llm: DedupLlmCall,
-  options: { signal?: AbortSignal; notDuplicates?: string[][] },
+  options: { signal?: AbortSignal; notDuplicates?: string[][]; onProgress?: DedupScanOptions["onProgress"] },
 ): Promise<DuplicateGroup[]> {
   const pages = summaries.map(summaryToEmbeddingPage)
+  const onProgress = options.onProgress
   const pairs = await candidatePairs(pages, embeddingConfig, {
     topK: DEDUP_PREFILTER_TOP_K,
     threshold: DEDUP_PREFILTER_THRESHOLD,
     maxPages: DEDUP_PREFILTER_MAX_PAGES,
     signal: options.signal,
+    onProgress: onProgress ? (i, t) => onProgress({ stage: "embedding", index: i, total: t }) : undefined,
   })
   if (pairs.length === 0) {
     // Preserve recall for small/medium wikis: a weak or non-multilingual
@@ -277,9 +307,10 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
   const batches = batchCandidateClusters(clusters, summaryByPath)
   const out: DuplicateGroup[] = []
 
-  for (const batch of batches) {
+  for (let b = 0; b < batches.length; b++) {
+    options.onProgress?.({ stage: "detecting", index: b + 1, total: batches.length })
     if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
-    const detected = await detectDuplicateGroups(batch, llm, options)
+    const detected = await detectDuplicateGroups(batches[b], llm, options)
     out.push(...detected)
   }
 

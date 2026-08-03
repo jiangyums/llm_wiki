@@ -844,6 +844,11 @@
           "description": "让 LLM 扫描全部 entity / concept 页面，把可能指向同一主题但用了不同名字的页面分组（中英对照、单复数、缩写与全称等）。每一组都需要你确认后才会合并。合并任务会进入串行队列依次执行，避免交叉引用被并发改写覆盖。",
           "scanButton": "扫描重复项",
           "scanning": "扫描中…",
+          "scanProgress": {
+            "reading": "正在读取页面 {{n}}/{{total}}",
+            "embedding": "正在生成向量 {{n}}/{{total}}",
+            "detecting": "正在检测候选组 {{n}}/{{total}}"
+          },
           "noneFound": "未发现重复分组，wiki 很干净。",
           "candidates": "{{n}} 个候选",
           "canonicalLabel": "保留以下页面作为主条目：",
