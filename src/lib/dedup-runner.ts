@@ -7,15 +7,16 @@
 import { listDirectory, readFile, writeFile, deleteFile } from "@/commands/fs"
 import { streamChat } from "@/lib/llm-client"
 import {
-  candidatePairs,
+  candidatePairsFromVectors,
   clusterByPairs,
+  loadPageVectors,
   DuplicatePrefilterCancelledError,
   type CandidatePair,
   type Page as DedupEmbeddingPage,
 } from "@/lib/dedup_embedding"
 import { loadEmbeddingConfig } from "@/lib/project-store"
 import { normalizePath } from "@/lib/path-utils"
-import type { EmbeddingConfig, LlmConfig } from "@/stores/wiki-store"
+import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
 
 /**
@@ -35,7 +36,6 @@ const DEDUP_DETECTION_MAX_TOKENS = 8_192
 // aliases, where cosine scores can be weaker on non-multilingual embedders.
 const DEDUP_PREFILTER_TOP_K = 8
 const DEDUP_PREFILTER_THRESHOLD = 0.68
-const DEDUP_PREFILTER_MAX_PAGES = 5_000
 const DEDUP_DETECTOR_BATCH_SUMMARIES = 80
 const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
 
@@ -64,6 +64,7 @@ import { loadNotDuplicates } from "./dedup-storage"
 
 export type DedupScanStage =
   | { stage: "reading"; index: number; total: number }
+  | { stage: "loading"; index: number; total: number }
   | { stage: "embedding"; index: number; total: number }
   | { stage: "detecting"; index: number; total: number }
 
@@ -244,16 +245,56 @@ export async function runDuplicateDetection(
     typeof embeddingConfig?.endpoint === "string" ? embeddingConfig.endpoint.trim() : ""
   if (embeddingConfig?.enabled && embeddingEndpoint) {
     try {
-      return await detectDuplicateGroupsWithEmbeddingPrefilter(
-        summaries,
-        embeddingConfig,
-        llm,
-        {
+      // Load page-level vectors: try existing full-text chunk vectors from
+      // LanceDB first, falling back to lightweight summary fetchEmbedding
+      // for pages not yet indexed.
+      const pages = summaries.map(summaryToEmbeddingPage)
+      const onLoading = onProgress
+        ? (i: number, t: number) => onProgress({ stage: "loading", index: i, total: t })
+        : undefined
+      const vectors = await loadPageVectors(projectPath, pages, embeddingConfig, {
+        signal: options.signal,
+        onProgress: onLoading,
+      })
+
+      const validPageIds = [...vectors.keys()]
+      if (validPageIds.length < 2) {
+        console.warn("[dedup] too few pages have vectors; skipping prefilter")
+        return detectDuplicateGroups(summaries, llm, {
           signal: options.signal,
           notDuplicates: notDup,
-          onProgress,
-        },
-      )
+        })
+      }
+
+      const pairs = candidatePairsFromVectors(vectors, validPageIds, {
+        topK: DEDUP_PREFILTER_TOP_K,
+        threshold: DEDUP_PREFILTER_THRESHOLD,
+      })
+      if (pairs.length === 0) {
+        return summaries.length <= DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT
+          ? detectDuplicateGroups(summaries, llm, { signal: options.signal, notDuplicates: notDup })
+          : []
+      }
+
+      const summaryByPath = new Map(summaries.map((s) => [s.path, s]))
+      const filteredPairs = filterWhitelistedPairs(pairs, summaryByPath, notDup)
+      if (filteredPairs.length === 0) return []
+
+      const clusters = clusterByPairs(validPageIds, filteredPairs)
+      if (clusters.length === 0) return []
+
+      const batches = batchCandidateClusters(clusters, summaryByPath)
+      const out: DuplicateGroup[] = []
+      for (let b = 0; b < batches.length; b++) {
+        onProgress?.({ stage: "detecting", index: b + 1, total: batches.length })
+        if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
+        const detected = await detectDuplicateGroups(batches[b], llm, {
+          signal: options.signal,
+          notDuplicates: notDup,
+        })
+        out.push(...detected)
+      }
+      return uniqueDuplicateGroups(out)
     } catch (err) {
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
@@ -269,52 +310,6 @@ export async function runDuplicateDetection(
     signal: options.signal,
     notDuplicates: notDup,
   })
-}
-
-async function detectDuplicateGroupsWithEmbeddingPrefilter(
-  summaries: EntitySummary[],
-  embeddingConfig: EmbeddingConfig,
-  llm: DedupLlmCall,
-  options: { signal?: AbortSignal; notDuplicates?: string[][]; onProgress?: DedupScanOptions["onProgress"] },
-): Promise<DuplicateGroup[]> {
-  const pages = summaries.map(summaryToEmbeddingPage)
-  const onProgress = options.onProgress
-  const pairs = await candidatePairs(pages, embeddingConfig, {
-    topK: DEDUP_PREFILTER_TOP_K,
-    threshold: DEDUP_PREFILTER_THRESHOLD,
-    maxPages: DEDUP_PREFILTER_MAX_PAGES,
-    signal: options.signal,
-    onProgress: onProgress ? (i, t) => onProgress({ stage: "embedding", index: i, total: t }) : undefined,
-  })
-  if (pairs.length === 0) {
-    // Preserve recall for small/medium wikis: a weak or non-multilingual
-    // embedder can miss exactly the cross-language aliases the LLM detector
-    // is meant to find. For large wikis, the old full scan is what caused
-    // #359 hangs, so no candidates means no detector call.
-    return summaries.length <= DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT
-      ? detectDuplicateGroups(summaries, llm, options)
-      : []
-  }
-
-  const summaryByPath = new Map(summaries.map((s) => [s.path, s]))
-  const filteredPairs = filterWhitelistedPairs(pairs, summaryByPath, options.notDuplicates ?? [])
-  if (filteredPairs.length === 0) return []
-
-  const pageIds = summaries.map((s) => s.path)
-  const clusters = clusterByPairs(pageIds, filteredPairs)
-  if (clusters.length === 0) return []
-
-  const batches = batchCandidateClusters(clusters, summaryByPath)
-  const out: DuplicateGroup[] = []
-
-  for (let b = 0; b < batches.length; b++) {
-    options.onProgress?.({ stage: "detecting", index: b + 1, total: batches.length })
-    if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
-    const detected = await detectDuplicateGroups(batches[b], llm, options)
-    out.push(...detected)
-  }
-
-  return uniqueDuplicateGroups(out)
 }
 
 function summaryToEmbeddingPage(summary: EntitySummary): DedupEmbeddingPage {

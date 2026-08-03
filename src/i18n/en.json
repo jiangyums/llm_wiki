@@ -846,6 +846,7 @@
           "scanning": "Scanning…",
           "scanProgress": {
             "reading": "Reading pages {{n}}/{{total}}",
+            "loading": "Loading vectors {{n}}/{{total}}",
             "embedding": "Generating embeddings {{n}}/{{total}}",
             "detecting": "Detecting groups {{n}}/{{total}}"
           },

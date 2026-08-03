@@ -666,6 +666,7 @@ pub fn run() {
             commands::vectorstore::vector_delete,
             commands::vectorstore::vector_count,
             commands::vectorstore::vector_upsert_chunks,
+            commands::vectorstore::vector_get_page_chunks,
             commands::vectorstore::vector_search_chunks,
             commands::vectorstore::vector_delete_page,
             commands::vectorstore::vector_count_chunks,

@@ -12,7 +12,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 // vi.mock is hoisted above imports; vi.hoisted keeps the fn out of the TDZ.
 const {
   mockCandidatePairs,
+  mockCandidatePairsFromVectors,
   mockClusterByPairs,
+  mockLoadPageVectors,
   mockListDirectory,
   mockLoadEmbeddingConfig,
   mockLoadNotDuplicates,
@@ -20,7 +22,9 @@ const {
   mockStreamChat,
 } = vi.hoisted(() => ({
   mockCandidatePairs: vi.fn(),
+  mockCandidatePairsFromVectors: vi.fn(),
   mockClusterByPairs: vi.fn(),
+  mockLoadPageVectors: vi.fn(),
   mockListDirectory: vi.fn(),
   mockLoadEmbeddingConfig: vi.fn(),
   mockLoadNotDuplicates: vi.fn(),
@@ -45,7 +49,9 @@ vi.mock("./dedup-storage", () => ({
 }))
 vi.mock("@/lib/dedup_embedding", () => ({
   candidatePairs: mockCandidatePairs,
+  candidatePairsFromVectors: mockCandidatePairsFromVectors,
   clusterByPairs: mockClusterByPairs,
+  loadPageVectors: mockLoadPageVectors,
   DuplicatePrefilterCancelledError: class DuplicatePrefilterCancelledError extends Error {
     name = "AbortError"
   },
@@ -69,16 +75,25 @@ const BAR_PATH = "/project/wiki/entities/bar.md"
 const BAZ_PATH = "/project/wiki/entities/baz.md"
 const FOO_REL = "wiki/entities/foo.md"
 const BAR_REL = "wiki/entities/bar.md"
+const BAZ_REL = "wiki/entities/baz.md"
 
 beforeEach(() => {
   mockCandidatePairs.mockReset()
+  mockCandidatePairsFromVectors.mockReset()
   mockClusterByPairs.mockReset()
+  mockLoadPageVectors.mockReset()
   mockListDirectory.mockReset()
   mockLoadEmbeddingConfig.mockReset()
   mockLoadNotDuplicates.mockReset()
   mockReadFile.mockReset()
   mockStreamChat.mockReset()
 })
+
+function setupMockVectors(pageRelPaths: string[]) {
+  mockLoadPageVectors.mockResolvedValue(
+    new Map(pageRelPaths.map((p) => [p, [0.1, 0.2, 0.3]])),
+  )
+}
 
 function setupThreePageProject() {
   mockListDirectory.mockResolvedValue([
@@ -208,7 +223,8 @@ describe("runDuplicateDetection embedding prefilter", () => {
     setupThreePageProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
-    mockCandidatePairs.mockResolvedValue([[FOO_REL, BAR_REL]])
+    setupMockVectors([FOO_REL, BAR_REL, BAZ_REL])
+    mockCandidatePairsFromVectors.mockReturnValue([[FOO_REL, BAR_REL]])
     mockClusterByPairs.mockReturnValue([[FOO_REL, BAR_REL]])
     mockDetectorGroup()
 
@@ -221,18 +237,19 @@ describe("runDuplicateDetection embedding prefilter", () => {
         confidence: "high",
       },
     ])
-    expect(mockCandidatePairs).toHaveBeenCalledOnce()
+    expect(mockLoadPageVectors).toHaveBeenCalledOnce()
+    expect(mockCandidatePairsFromVectors).toHaveBeenCalledOnce()
     const detectorUserMessage = mockStreamChat.mock.calls[0][1][1].content
     expect(detectorUserMessage).toContain("slug=foo")
     expect(detectorUserMessage).toContain("slug=bar")
     expect(detectorUserMessage).not.toContain("slug=baz")
   })
 
-  it("falls back to the full LLM scan when the embedding prefilter fails", async () => {
+  it("falls back to the full LLM scan when loadPageVectors fails", async () => {
     setupThreePageProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
-    mockCandidatePairs.mockRejectedValue(new Error("embedding endpoint unavailable"))
+    mockLoadPageVectors.mockRejectedValue(new Error("LanceDB unavailable"))
     mockDetectorGroup()
 
     await runDuplicateDetection("/project", cfg)
@@ -255,16 +272,17 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     await runDuplicateDetection("/project", cfg)
 
-    expect(mockCandidatePairs).not.toHaveBeenCalled()
+    expect(mockLoadPageVectors).not.toHaveBeenCalled()
     const detectorUserMessage = mockStreamChat.mock.calls[0][1][1].content
     expect(detectorUserMessage).toContain("slug=baz")
   })
 
-  it("falls back to the full LLM scan for small wikis when the prefilter returns no candidates", async () => {
+  it("falls back to the full LLM scan for small wikis when candidatePairsFromVectors returns no candidates", async () => {
     setupThreePageProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
-    mockCandidatePairs.mockResolvedValue([])
+    setupMockVectors([FOO_REL, BAR_REL, BAZ_REL])
+    mockCandidatePairsFromVectors.mockReturnValue([])
     mockDetectorGroup()
 
     const result = await runDuplicateDetection("/project", cfg)
@@ -283,11 +301,12 @@ describe("runDuplicateDetection embedding prefilter", () => {
     expect(mockClusterByPairs).not.toHaveBeenCalled()
   })
 
-  it("short-circuits large wiki scans when the prefilter returns no candidates", async () => {
+  it("short-circuits large wiki scans when candidatePairsFromVectors returns no candidates", async () => {
     setupLargeProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
-    mockCandidatePairs.mockResolvedValue([])
+    setupMockVectors(Array.from({ length: 251 }, (_, i) => `wiki/entities/p${i}.md`))
+    mockCandidatePairsFromVectors.mockReturnValue([])
 
     const result = await runDuplicateDetection("/project", cfg)
 
@@ -296,11 +315,11 @@ describe("runDuplicateDetection embedding prefilter", () => {
     expect(mockClusterByPairs).not.toHaveBeenCalled()
   })
 
-  it("does not fall back to the full LLM scan for large wikis when embedding coverage is too low", async () => {
+  it("does not fall back to the full LLM scan for large wikis when loadPageVectors coverage is too low", async () => {
     setupLargeProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
-    mockCandidatePairs.mockRejectedValue(new Error("Duplicate prefilter embedded only 2/251 pages"))
+    mockLoadPageVectors.mockRejectedValue(new Error("Duplicate prefilter embedded only 2/251 pages"))
 
     const result = await runDuplicateDetection("/project", cfg)
 
@@ -314,7 +333,8 @@ describe("runDuplicateDetection embedding prefilter", () => {
       ["wiki/entities/foo.md", "wiki/entities/bar.md"],
     ])
     setupEmbeddingConfig()
-    mockCandidatePairs.mockResolvedValue([[FOO_REL, BAR_REL]])
+    setupMockVectors([FOO_REL, BAR_REL, BAZ_REL])
+    mockCandidatePairsFromVectors.mockReturnValue([[FOO_REL, BAR_REL]])
     mockClusterByPairs.mockReturnValue([[FOO_REL, BAR_REL]])
 
     const result = await runDuplicateDetection("/project", cfg)
@@ -329,7 +349,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
     setupEmbeddingConfig()
     const controller = new AbortController()
     controller.abort()
-    mockCandidatePairs.mockRejectedValue(new Error("Duplicate scan cancelled"))
+    mockLoadPageVectors.mockRejectedValue(new Error("Duplicate scan cancelled"))
 
     await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }))
       .rejects.toThrow(/cancelled/i)
@@ -366,10 +386,8 @@ describe("runDuplicateDetection progress", () => {
     setupThreePageProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
-    mockCandidatePairs.mockResolvedValue([
-      ["wiki/entities/foo.md", "wiki/entities/bar.md"],
-      ["wiki/entities/bar.md", "wiki/entities/baz.md"],
-    ])
+    setupMockVectors([FOO_REL, BAR_REL, BAZ_REL])
+    mockCandidatePairsFromVectors.mockReturnValue([[FOO_REL, BAR_REL]])
     mockClusterByPairs.mockReturnValue([["wiki/entities/foo.md", "wiki/entities/bar.md"]])
     mockDetectorGroup()
 

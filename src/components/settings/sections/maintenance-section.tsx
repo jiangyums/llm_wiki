@@ -377,6 +377,12 @@ export function MaintenanceSection() {
                   n: scanProgress.index,
                   total: scanProgress.total,
                 })}
+              {scanProgress.stage === "loading" &&
+                t("settings.sections.maintenance.dedup.scanProgress.loading", {
+                  defaultValue: "Loading vectors {{n}}/{{total}}",
+                  n: scanProgress.index,
+                  total: scanProgress.total,
+                })}
               {scanProgress.stage === "embedding" &&
                 t("settings.sections.maintenance.dedup.scanProgress.embedding", {
                   defaultValue: "Generating embeddings {{n}}/{{total}}",

@@ -619,6 +619,108 @@ pub async fn vector_search_chunks(
     .await
 }
 
+/// A single chunk's embedding vector, returned by `vector_get_page_chunks`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChunkVector {
+    pub chunk_id: String,
+    pub chunk_index: u32,
+    pub chunk_text: String,
+    pub heading_path: String,
+    pub embedding: Vec<f32>,
+}
+
+/// Return every chunk vector for a given page. Used by the dedup prefilter
+/// to reuse existing full-text chunk embeddings instead of re-embedding
+/// lightweight summaries. Returns an empty vec when the page has no chunks
+/// (not yet indexed, or content was empty).
+#[tauri::command]
+pub async fn vector_get_page_chunks(
+    project_path: String,
+    page_id: String,
+) -> Result<Vec<ChunkVector>, String> {
+    run_guarded_async("vector_get_page_chunks", async move {
+        validate_page_id_for_v2(&page_id)?;
+        let lock = vectorstore_v2_lock(&project_path);
+        let _guard = lock.read().await;
+
+        let db = connect(&db_path(&project_path))
+            .execute()
+            .await
+            .map_err(|e| format!("DB connect error: {e}"))?;
+
+        let tables = db
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("List tables error: {e}"))?;
+
+        if !tables.contains(&TABLE_V2.to_string()) {
+            return Ok(vec![]);
+        }
+
+        let table = db
+            .open_table(TABLE_V2)
+            .execute()
+            .await
+            .map_err(|e| format!("Open table error: {e}"))?;
+
+        let results_stream = table
+            .filter(format!("page_id = '{}'", page_id))
+            .execute()
+            .await
+            .map_err(|e| format!("Scan error: {e}"))?;
+
+        use futures::TryStreamExt;
+        let batches: Vec<RecordBatch> = results_stream
+            .try_collect()
+            .await
+            .map_err(|e| format!("Collect error: {e}"))?;
+
+        let mut out: Vec<ChunkVector> = Vec::new();
+        for batch in &batches {
+            let chunk_ids = batch
+                .column_by_name("chunk_id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or("Missing chunk_id column")?;
+            let chunk_indexes = batch
+                .column_by_name("chunk_index")
+                .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
+                .ok_or("Missing chunk_index column")?;
+            let chunk_texts = batch
+                .column_by_name("chunk_text")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or("Missing chunk_text column")?;
+            let heading_paths = batch
+                .column_by_name("heading_path")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or("Missing heading_path column")?;
+            let vectors = batch
+                .column_by_name("vector")
+                .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
+                .ok_or("Missing vector column")?;
+
+            for i in 0..batch.num_rows() {
+                let values = vectors.value(i);
+                let arr = values.as_any().downcast_ref::<Float32Array>().ok_or(
+                    "Vector column is not Float32",
+                )?;
+                let embedding: Vec<f32> = arr.values().to_vec();
+
+                out.push(ChunkVector {
+                    chunk_id: chunk_ids.value(i).to_string(),
+                    chunk_index: chunk_indexes.value(i),
+                    chunk_text: chunk_texts.value(i).to_string(),
+                    heading_path: heading_paths.value(i).to_string(),
+                    embedding,
+                });
+            }
+        }
+
+        Ok(out)
+    })
+    .await
+}
+
 /// Delete every chunk belonging to a page. Used when a source document
 /// is removed, or before a full re-embed of a page whose content shrank.
 #[tauri::command]

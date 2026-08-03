@@ -846,6 +846,7 @@
           "scanning": "扫描中…",
           "scanProgress": {
             "reading": "正在读取页面 {{n}}/{{total}}",
+            "loading": "正在读取已有向量 {{n}}/{{total}}",
             "embedding": "正在生成向量 {{n}}/{{total}}",
             "detecting": "正在检测候选组 {{n}}/{{total}}"
           },

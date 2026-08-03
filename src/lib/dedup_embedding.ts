@@ -5,8 +5,11 @@
  * Pre-filters pages by cosine similarity so the downstream LLM detector
  * only sees a small candidate set (issue #359).
  *
- * Uses real fetchEmbedding() from ./embedding (raw text → vector API).
+ * Reuses existing full-text chunk vectors from LanceDB (the general
+ * embedding pipeline already indexes every page's chunks). Pages that
+ * haven't been indexed yet fall back to a lightweight summary fetchEmbedding.
  */
+import { invoke } from "@tauri-apps/api/core"
 import { fetchEmbedding } from "./embedding"
 import type { EmbeddingConfig } from "@/stores/wiki-store"
 
@@ -15,6 +18,80 @@ export interface Page {
   title: string
   body?: string
   tags?: string[]
+}
+
+/** A single chunk vector returned by the Rust `vector_get_page_chunks` command. */
+export interface ChunkVector {
+  chunk_id: string
+  chunk_index: number
+  chunk_text: string
+  heading_path: string
+  embedding: number[]
+}
+
+/**
+ * Average-pool a list of chunk vectors into a single page-level vector.
+ * Each dimension is the mean of that dimension across all chunks.
+ * Returns an empty array if `chunks` is empty.
+ */
+export function averagePool(chunks: ChunkVector[]): number[] {
+  if (chunks.length === 0) return []
+  const dim = chunks[0].embedding.length
+  const sum = new Float64Array(dim)
+  for (const c of chunks) {
+    for (let i = 0; i < dim; i++) {
+      sum[i] += c.embedding[i]
+    }
+  }
+  const out = new Array<number>(dim)
+  const n = chunks.length
+  for (let i = 0; i < dim; i++) {
+    out[i] = sum[i] / n
+  }
+  return out
+}
+
+/**
+ * Load page-level vectors for a set of page IDs. For each page, tries
+ * to read existing full-text chunk vectors from LanceDB (via the Rust
+ * `vector_get_page_chunks` command). If the page has chunks, average-pools
+ * them into a single vector. If not (page not yet indexed), falls back to
+ * embedding a lightweight summary via fetchEmbedding.
+ *
+ * Returns a Map<pageId, number[]>.
+ */
+export async function loadPageVectors(
+  projectPath: string,
+  pages: Page[],
+  cfg: EmbeddingConfig,
+  options: { signal?: AbortSignal; onProgress?: (index: number, total: number) => void } = {},
+): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>()
+  for (let i = 0; i < pages.length; i++) {
+    throwIfAborted(options.signal)
+    const p = pages[i]
+    try {
+      const chunks = await invoke<ChunkVector[]>("vector_get_page_chunks", {
+        projectPath,
+        pageId: p.id,
+      })
+      if (chunks.length > 0) {
+        out.set(p.id, averagePool(chunks))
+      } else {
+        // Fallback: no chunk vectors in LanceDB — embed lightweight summary
+        const text = pageToEmbeddingText(p)
+        const vec = await fetchEmbedding(text, cfg)
+        if (vec) out.set(p.id, vec)
+      }
+    } catch {
+      // Fallback on error too (e.g. LanceDB table not created yet)
+      const text = pageToEmbeddingText(p)
+      const vec = await fetchEmbedding(text, cfg)
+      if (vec) out.set(p.id, vec)
+    }
+    options.onProgress?.(i + 1, pages.length)
+  }
+  return out
 }
 
 export interface CandidateOptions {
@@ -146,24 +223,47 @@ export async function candidatePairs(
     )
   }
 
+  const validVectors = new Map<string, number[]>()
+  for (const p of subset) {
+    const v = embeddings.get(p.id)
+    if (v) validVectors.set(p.id, v)
+  }
+
+  return candidatePairsFromVectors(validVectors, [...validVectors.keys()], { topK, threshold })
+}
+
+/**
+ * Generate candidate pairs from pre-computed page-level vectors.
+ * Same pairwise logic as `candidatePairs` but skips the embedding step.
+ * Each page's top-K nearest neighbors above threshold, self-excluded,
+ * symmetric deduplicated.
+ */
+export function candidatePairsFromVectors(
+  vectors: Map<string, number[]>,
+  pageIds: string[],
+  options: { topK?: number; threshold?: number } = {},
+): CandidatePair[] {
+  const topK = options.topK ?? 8
+  const threshold = options.threshold ?? 0.82
+
   const pairSet = new Set<string>()
   const pairs: CandidatePair[] = []
 
-  for (let i = 0; i < subset.length; i++) {
-    const vi = embeddings.get(subset[i].id)
+  for (let i = 0; i < pageIds.length; i++) {
+    const vi = vectors.get(pageIds[i])
     if (!vi) continue
     const scored: Array<{ j: number; sim: number }> = []
-    for (let j = 0; j < subset.length; j++) {
+    for (let j = 0; j < pageIds.length; j++) {
       if (i === j) continue
-      const vj = embeddings.get(subset[j].id)
+      const vj = vectors.get(pageIds[j])
       const sim = cosineSimilarity(vi, vj)
       if (sim >= threshold) scored.push({ j, sim })
     }
     scored.sort((a, b) => b.sim - a.sim)
 
     for (let k = 0; k < Math.min(topK, scored.length); k++) {
-      const a = subset[i].id
-      const b = subset[scored[k].j].id
+      const a = pageIds[i]
+      const b = pageIds[scored[k].j]
       const key = a < b ? `${a}\t${b}` : `${b}\t${a}`
       if (!pairSet.has(key)) {
         pairSet.add(key)
