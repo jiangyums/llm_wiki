@@ -241,13 +241,23 @@ pub async fn reset_project(project_path: String) -> Result<(), String> {
             }
         }
 
-        // Recreate empty directories so the project structure is preserved.
-        fs::create_dir_all(&wiki).map_err(|e| {
-            format!("Failed to create wiki directory: {e}")
-        })?;
-        fs::create_dir_all(&raw).map_err(|e| {
-            format!("Failed to create raw directory: {e}")
-        })?;
+        // Recreate the standard directory structure (mirrors create_project)
+        // so the project is in a usable state immediately.
+        let dirs = [
+            "raw/sources",
+            "raw/assets",
+            "wiki/entities",
+            "wiki/concepts",
+            "wiki/sources",
+            "wiki/queries",
+            "wiki/comparisons",
+            "wiki/synthesis",
+        ];
+        for dir in dirs {
+            fs::create_dir_all(root.join(dir)).map_err(|e| {
+                format!("Failed to create directory '{dir}': {e}")
+            })?;
+        }
 
         Ok(())
     })
