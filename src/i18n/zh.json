@@ -837,7 +837,10 @@
           "import": "导入项目",
           "rebuilt": "已使用 {{pages}} 个页面、{{groups}} 个分组重建索引。",
           "exported": "项目已导出到 {{path}}",
-          "imported": "已导入 {{name}}，请切换项目后打开。"
+          "imported": "已导入 {{name}}，请切换项目后打开。",
+          "reset": "重置项目",
+          "resetConfirm": "这将删除所有 wiki 页面、原始源文件和生成数据。确定吗？",
+          "resetDone": "项目已重置，重新打开即可开始使用。"
         },
         "dedup": {
           "title": "检测重复实体 / 概念",

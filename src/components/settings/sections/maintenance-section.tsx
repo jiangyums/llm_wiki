@@ -93,6 +93,20 @@ export function MaintenanceSection() {
     } catch (error) { setProjectToolStatus(String(error)) } finally { setProjectToolBusy(false) }
   }, [project, t])
 
+  const handleResetProject = useCallback(async () => {
+    if (!project) return
+    const confirmed = confirm(t("settings.sections.maintenance.projectData.resetConfirm", {
+      defaultValue: "This will delete ALL wiki pages, raw source files, and generated data. Are you sure?",
+    }))
+    if (!confirmed) return
+    setProjectToolBusy(true)
+    try {
+      await invoke("reset_project", { projectPath: project.path })
+      await refreshProjectFileTree(project.path, { bumpDataVersion: true, clearDisplayTreeFirst: true })
+      setProjectToolStatus(t("settings.sections.maintenance.projectData.resetDone", { defaultValue: "Project has been reset. Re-open it to start fresh." }))
+    } catch (error) { setProjectToolStatus(String(error)) } finally { setProjectToolBusy(false) }
+  }, [project, t])
+
   const handleExportProject = useCallback(async () => {
     if (!project) return
     const destination = await save({ defaultPath: `${project.name}.llmwiki.zip`, filters: [{ name: "LLM Wiki project", extensions: ["zip"] }] })
@@ -368,6 +382,7 @@ export function MaintenanceSection() {
           <Button variant="outline" onClick={() => void handleRebuildIndex()} disabled={!project || projectToolBusy}>{t("settings.sections.maintenance.projectData.rebuild")}</Button>
           <Button variant="outline" onClick={() => void handleExportProject()} disabled={!project || projectToolBusy}><Archive className="h-4 w-4" />{t("settings.sections.maintenance.projectData.export")}</Button>
           <Button variant="outline" onClick={() => void handleImportProject()} disabled={projectToolBusy}>{t("settings.sections.maintenance.projectData.import")}</Button>
+          <Button variant="destructive" size="sm" onClick={() => void handleResetProject()} disabled={projectToolBusy}>{t("settings.sections.maintenance.projectData.reset")}</Button>
         </div>
         {projectToolStatus && <p className="text-xs text-muted-foreground">{projectToolStatus}</p>}
       </div>

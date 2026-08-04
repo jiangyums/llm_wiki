@@ -645,6 +645,7 @@ pub fn run() {
             commands::project_maintenance::export_project_archive,
             commands::project_maintenance::import_project_archive,
             commands::project_maintenance::rebuild_wiki_index,
+            commands::project_maintenance::reset_project,
             commands::search::search_project,
             commands::search::embedding_fetch,
             commands::search::embedding_fetch_batch,

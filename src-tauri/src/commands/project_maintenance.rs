@@ -222,6 +222,36 @@ fn frontmatter_value(content: &str, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Reset a project to its initial empty state: delete all wiki pages,
+/// raw source files, and generated data (.llm-wiki), then recreate an
+/// empty wiki directory. The project folder itself is preserved.
+#[tauri::command]
+pub async fn reset_project(project_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = PathBuf::from(&project_path);
+        let wiki = root.join("wiki");
+        let raw = root.join("raw");
+        let llm_wiki = root.join(".llm-wiki");
+
+        for dir in [&wiki, &raw, &llm_wiki] {
+            if dir.exists() {
+                fs::remove_dir_all(dir).map_err(|e| {
+                    format!("Failed to remove {}: {e}", dir.display())
+                })?;
+            }
+        }
+
+        // Recreate an empty wiki directory so the project is usable immediately.
+        fs::create_dir_all(&wiki).map_err(|e| {
+            format!("Failed to create wiki directory: {e}")
+        })?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("Project reset task failed: {error}"))?
+}
+
 #[tauri::command]
 pub async fn rebuild_wiki_index(project_path: String) -> Result<RebuildIndexResult, String> {
     tauri::async_runtime::spawn_blocking(move || rebuild_wiki_index_inner(project_path))

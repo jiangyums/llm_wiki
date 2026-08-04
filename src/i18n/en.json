@@ -837,7 +837,10 @@
           "import": "Import project",
           "rebuilt": "Rebuilt index with {{pages}} pages in {{groups}} groups.",
           "exported": "Project exported to {{path}}",
-          "imported": "Imported {{name}}. Switch projects to open it."
+          "imported": "Imported {{name}}. Switch projects to open it.",
+          "reset": "Reset project",
+          "resetConfirm": "This will delete ALL wiki pages, raw source files, and generated data. Are you sure?",
+          "resetDone": "Project has been reset. Re-open it to start fresh."
         },
         "dedup": {
           "title": "Detect duplicate entities / concepts",
