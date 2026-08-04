@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { invoke } from "@tauri-apps/api/core"
 import { open, save } from "@tauri-apps/plugin-dialog"
@@ -544,18 +544,53 @@ interface PageDetailPopupProps {
 
 function PageDetailPopup({ path, content, loading, onClose }: PageDetailPopupProps) {
   const { t } = useTranslation()
+  const [pos, setPos] = useState(() => ({
+    x: window.innerWidth * 0.75 - 16,
+    y: window.innerHeight * 0.75 - 16,
+  }))
+  const dragRef = useRef<{
+    startX: number; startY: number; origX: number; origY: number
+  } | null>(null)
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragRef.current) return
+      setPos({
+        x: dragRef.current.origX + (e.clientX - dragRef.current.startX),
+        y: dragRef.current.origY + (e.clientY - dragRef.current.startY),
+      })
+    }
+    const handleMouseUp = () => { dragRef.current = null }
+    document.addEventListener("mousemove", handleMouseMove)
+    document.addEventListener("mouseup", handleMouseUp)
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove)
+      document.removeEventListener("mouseup", handleMouseUp)
+    }
+  }, [])
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y }
+  }, [pos])
+
   return (
-    <div className="fixed bottom-4 right-4 z-50 w-[42rem] max-h-[80vh] overflow-auto rounded-xl border bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 shadow-lg">
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <code className="truncate font-mono text-xs">{path}</code>
+    <div
+      className="fixed z-50 flex flex-col overflow-hidden rounded-xl border bg-popover text-sm text-popover-foreground ring-1 ring-foreground/10 shadow-lg"
+      style={{ width: "25vw", left: pos.x, top: pos.y, maxHeight: "80vh" }}
+    >
+      <div
+        className="flex cursor-grab items-center justify-between gap-2 border-b bg-muted/30 px-3 py-2 active:cursor-grabbing"
+        onMouseDown={handleMouseDown}
+      >
+        <code className="truncate font-mono text-[10px]">{path}</code>
         <button
           onClick={onClose}
-          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
         >
-          <X className="h-4 w-4" />
+          <X className="h-3.5 w-3.5" />
         </button>
       </div>
-      <div className="max-h-[65vh] overflow-auto">
+      <div className="flex-1 overflow-auto p-3">
         {loading ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -564,7 +599,7 @@ function PageDetailPopup({ path, content, loading, onClose }: PageDetailPopupPro
             })}
           </div>
         ) : (
-          <pre className="whitespace-pre-wrap break-all rounded bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-foreground">
+          <pre className="whitespace-pre-wrap break-all rounded bg-muted/30 p-2 font-mono text-[10px] leading-relaxed text-foreground">
             {content}
           </pre>
         )}
