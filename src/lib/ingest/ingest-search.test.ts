@@ -17,6 +17,10 @@ describe("searchRelatedWikiPages", () => {
     expect(await searchRelatedWikiPages("/p", "src.txt", "")).toBe("")
   })
 
+  it("returns empty string for whitespace-only source context", async () => {
+    expect(await searchRelatedWikiPages("/p", "src.txt", "   ")).toBe("")
+  })
+
   it("returns empty string when search returns nothing", async () => {
     mockSearchWiki.mockResolvedValueOnce([])
     expect(await searchRelatedWikiPages("/p", "src.txt", "some text")).toBe("")
@@ -33,7 +37,7 @@ describe("searchRelatedWikiPages", () => {
 
     expect(out).toContain("| kleine-moretti | 克莱恩莫雷蒂 | entity |")
     expect(out).toContain("| beyonder-system | 非凡者体系 | concept |")
-    expect(out).not.toContain("some.md")
+    expect(out).not.toContain("A Source")
   })
 
   it("excludes the current source's own slug", async () => {
@@ -71,6 +75,7 @@ describe("mergeRelatedPages", () => {
     const out = mergeRelatedPages(existing, manifest)
 
     expect(out).toContain("| zhou-ming-rui | 周明瑞 | other |")
+    expect(out).not.toContain("| zhou-ming-rui | 周明瑞 | entity |")
     expect(out).toContain("| kleine-moretti | 克莱恩莫雷蒂 | entity |")
   })
 
@@ -78,7 +83,7 @@ describe("mergeRelatedPages", () => {
     expect(mergeRelatedPages("", [])).toBe("")
   })
 
-  it("handles undefined/empty relatedPages and only emits manifest rows", () => {
+  it("handles empty relatedPages and only emits manifest rows", () => {
     const manifest = [
       { type: "concept" as const, slug: "iron-age", title: "黑铁时代" },
     ]
