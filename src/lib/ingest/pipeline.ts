@@ -356,14 +356,16 @@ async function runEntityPageGeneration(params: EntityPageParams): Promise<Entity
   let entityGeneration = ""
   let entityReasoning = ""
   let hadError = false
+  let entityErr: Error | undefined
   await streamChat(
     llmConfig,
     entityMessages,
     {
       onToken: (token) => { entityGeneration += token },
       onDone: () => {},
-      onError: () => {
+      onError: (err) => {
         hadError = true
+        entityErr = err
       },
       onReasoningToken: (token) => { entityReasoning += token },
     },
@@ -374,7 +376,7 @@ async function runEntityPageGeneration(params: EntityPageParams): Promise<Entity
   try { await writeFile(`${pp}/wiki/ingest-step2a-entity.log`, entityGeneration) } catch {}
   try { await writeFile(`${pp}/wiki/ingest-step2a-entity-reasoning.log`, entityReasoning) } catch {}
 
-  if (hadError) throw new IngestError("system", "Entity page generation failed")
+  if (hadError) throw new IngestError(classifyLlmError(entityErr ?? new Error("unknown error")), `Entity page generation failed: ${entityErr?.message ?? "unknown error"}`, entityErr)
   if (!entityGeneration.trim()) {
     throw new IngestError("llm_output", `Entity page generation returned empty output for "${sourceIdentity}"`)
   }
@@ -475,14 +477,16 @@ async function runConceptPageGeneration(params: ConceptPageParams): Promise<Conc
   let conceptReasoning = ""
   try { await writeFile(`${pp}/wiki/ingest-step2a-concept-prompt.log`, JSON.stringify(conceptMessages, null, 2)) } catch {}
   let hadError = false
+  let conceptErr: Error | undefined
   await streamChat(
     llmConfig,
     conceptMessages,
     {
       onToken: (token) => { conceptGeneration += token },
       onDone: () => {},
-      onError: () => {
+      onError: (err) => {
         hadError = true
+        conceptErr = err
       },
       onReasoningToken: (token) => { conceptReasoning += token },
     },
@@ -493,7 +497,7 @@ async function runConceptPageGeneration(params: ConceptPageParams): Promise<Conc
   try { await writeFile(`${pp}/wiki/ingest-step2a-concept.log`, conceptGeneration) } catch {}
   try { await writeFile(`${pp}/wiki/ingest-step2a-concept-reasoning.log`, conceptReasoning) } catch {}
 
-  if (hadError) throw new IngestError("system", "Concept page generation failed")
+  if (hadError) throw new IngestError(classifyLlmError(conceptErr ?? new Error("unknown error")), `Concept page generation failed: ${conceptErr?.message ?? "unknown error"}`, conceptErr)
   if (!conceptGeneration.trim()) {
     throw new IngestError("llm_output", `Concept page generation returned empty output for "${sourceIdentity}"`)
   }

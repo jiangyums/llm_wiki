@@ -1,14 +1,22 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, beforeEach, vi } from "vitest"
 import type { FileNode } from "@/types/wiki"
 import {
   buildProjectPathIndexFromTree,
   createEmptyProjectPathIndex,
   findInTreeByName,
+  resolvePageTitle,
   resolveRelatedSlug,
   resolveSourceReference,
   resolveSourceName,
   unwrapWikilink,
 } from "./wiki-page-resolver"
+
+vi.mock("@/commands/fs", () => ({
+  readFile: vi.fn(),
+}))
+
+import { readFile } from "@/commands/fs"
+const mockReadFile = vi.mocked(readFile)
 
 const PP = "/p"
 const WIKI = `${PP}/wiki`
@@ -42,6 +50,10 @@ const TREE: FileNode[] = [
 ]
 
 const INDEX = buildProjectPathIndexFromTree(TREE)
+
+beforeEach(() => {
+  mockReadFile.mockReset()
+})
 
 const DUP_TREE: FileNode[] = [
   dir(`${PP}/raw`, [
@@ -364,5 +376,33 @@ describe("resolveSourceReference", () => {
       kind: "external",
       url: "https://example.com/",
     })
+  })
+})
+
+describe("resolvePageTitle", () => {
+  it("resolves a bare slug to its page and reads the frontmatter title", async () => {
+    mockReadFile.mockResolvedValue("---\ntitle: Foo Page\ntype: entity\n---\n# Body")
+    expect(await resolvePageTitle(INDEX, "foo", WIKI)).toBe("Foo Page")
+    expect(mockReadFile).toHaveBeenCalledWith(`${WIKI}/entities/foo.md`)
+  })
+
+  it("resolves path-like related references", async () => {
+    mockReadFile.mockResolvedValue("---\ntitle: Bar Concept\n---\n# Body")
+    expect(await resolvePageTitle(INDEX, "wiki/concepts/bar.md", WIKI)).toBe("Bar Concept")
+  })
+
+  it("returns null when the page has no non-empty frontmatter title", async () => {
+    mockReadFile.mockResolvedValue("---\ntype: entity\n---\n# Body")
+    expect(await resolvePageTitle(INDEX, "foo", WIKI)).toBeNull()
+  })
+
+  it("returns null when the target page does not resolve", async () => {
+    expect(await resolvePageTitle(INDEX, "ghost", WIKI)).toBeNull()
+    expect(mockReadFile).not.toHaveBeenCalled()
+  })
+
+  it("returns null when reading the target page fails", async () => {
+    mockReadFile.mockRejectedValue(new Error("boom"))
+    expect(await resolvePageTitle(INDEX, "foo", WIKI)).toBeNull()
   })
 })

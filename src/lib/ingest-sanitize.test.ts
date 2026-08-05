@@ -114,6 +114,43 @@ describe("sanitizeIngestedFileContent", () => {
     expect(sanitizeIngestedFileContent(input)).toBe(input)
   })
 
+  it("repairs a glued `---` closing delimiter on the last frontmatter line", () => {
+    const input = [
+      "---",
+      'type: source',
+      'tags: [a]',
+      'related: [b]',
+      "created: 2026-08-04",
+      "updated: 2026-08-04---",
+      "# Body",
+    ].join("\n")
+    expect(sanitizeIngestedFileContent(input)).toBe([
+      "---",
+      'type: source',
+      'tags: [a]',
+      'related: [b]',
+      "created: 2026-08-04",
+      "updated: 2026-08-04",
+      "---",
+      "# Body",
+    ].join("\n"))
+  })
+
+  it("repairs a glued `---` on the only frontmatter line", () => {
+    const input = "---\ntype: source---\n# Body"
+    expect(sanitizeIngestedFileContent(input)).toBe("---\ntype: source\n---\n# Body")
+  })
+
+  it("does not touch a frontmatter whose closing `---` is already proper", () => {
+    const input = "---\ntype: x\n---\n\n# Body"
+    expect(sanitizeIngestedFileContent(input)).toBe(input)
+  })
+
+  it("does not touch content without frontmatter", () => {
+    const input = "# Just a heading\n\nbody"
+    expect(sanitizeIngestedFileContent(input)).toBe(input)
+  })
+
   it("composes all three repairs on a real-corpus-shaped input", () => {
     const input =
       "```yaml\nfrontmatter:\n---\ntype: entity\nrelated: [[a]], [[b]]\n---\n\n# Body\n```"

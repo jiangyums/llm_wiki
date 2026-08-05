@@ -1,4 +1,6 @@
 import type { FileNode } from "@/types/wiki"
+import { parseFrontmatter } from "@/lib/frontmatter"
+import { readFile } from "@/commands/fs"
 
 export interface ProjectPathIndexEntry {
   name: string
@@ -184,6 +186,28 @@ export function resolveSourceName(
 function findInTreeByPath(index: ProjectPathIndex, targetPath: string): string | null {
   const found = index.byPath.get(targetPath)
   return found?.path ?? null
+}
+
+/**
+ * Resolve a wikilink / related reference to its target page and read
+ * that page's frontmatter `title`. Returns null when the page can't be
+ * resolved, read, or has no non-empty title — callers fall back to the
+ * slug / alias in that case.
+ */
+export async function resolvePageTitle(
+  index: ProjectPathIndex,
+  ref: string,
+  wikiRoot: string,
+): Promise<string | null> {
+  const path = resolveRelatedSlug(index, ref, wikiRoot)
+  if (!path) return null
+  try {
+    const content = await readFile(path)
+    const title = parseFrontmatter(content).frontmatter?.title
+    return typeof title === "string" && title.trim() ? title.trim() : null
+  } catch {
+    return null
+  }
 }
 
 function normalizeHttpUrl(ref: string): string | null {

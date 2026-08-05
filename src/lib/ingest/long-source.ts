@@ -38,6 +38,7 @@ export async function compressLongSource(
 
   let compressed = ""
   let hadError = false
+  let compressErr: Error | undefined
   await streamChat(
     llmConfig,
     [
@@ -58,14 +59,14 @@ export async function compressLongSource(
     {
       onToken: (token) => { compressed += token },
       onDone: () => {},
-      onError: () => { hadError = true },
+      onError: (err) => { hadError = true; compressErr = err },
     },
     signal,
     { temperature: 0.1, max_tokens: 8192 },
   )
 
   if (hadError) {
-    throw new IngestError("system", "Source compression failed")
+    throw new IngestError("system", `Source compression failed: ${compressErr?.message ?? "unknown error"}`)
   }
   if (!compressed.trim()) {
     throw new IngestError("llm_output", "Compression returned empty output")

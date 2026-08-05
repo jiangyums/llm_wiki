@@ -79,6 +79,14 @@ export function sanitizeIngestedFileContent(content: string): string {
   // clearly emitted frontmatter lines followed by a closing fence.
   cleaned = addMissingOpeningFrontmatterFence(cleaned)
 
+  // (2.75) Repair a glued closing `---` that the model wrote on the
+  // same line as the last frontmatter field, e.g.
+  //
+  //     updated: 2026-08-04---
+  //
+  // instead of emitting `---` on its own line.
+  cleaned = repairGluedFrontmatterClosing(cleaned)
+
   // (3) Repair `key: [[a]], [[b]], [[c]]` lines inside the
   // frontmatter block so they're valid YAML. Body wikilinks are
   // left alone — those render fine via the wikilink → markdown
@@ -142,6 +150,33 @@ function addMissingOpeningFrontmatterFence(content: string): string {
       return `---\n${lines.slice(firstContentIdx).join("\n")}`
     }
     if (/^#{1,6}\s+/.test(trimmed)) break
+  }
+
+  return content
+}
+
+/**
+ * When the model writes the closing `---` on the same line as the last
+ * frontmatter field (e.g. `updated: 2026-08-04---`), split the line
+ * so the closing delimiter stands on its own.
+ */
+function repairGluedFrontmatterClosing(content: string): string {
+  if (!/^---\r?\n/.test(content)) return content
+
+  const lines = content.split(/\r?\n/)
+  if (lines.length < 2) return content
+
+  for (let i = 1; i < lines.length; i++) {
+    const trimmed = lines[i].trimEnd()
+    if (trimmed === "---") return content
+    if (trimmed.endsWith("---")) {
+      const idx = lines[i].lastIndexOf("---")
+      const before = lines[i].slice(0, idx)
+      const after = lines[i].slice(idx + 3)
+      lines[i] = before
+      lines.splice(i + 1, 0, "---" + after)
+      return lines.join("\n")
+    }
   }
 
   return content

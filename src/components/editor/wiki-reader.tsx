@@ -1,11 +1,11 @@
-import { useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
-import { transformImageEmbeds, transformWikilinks } from "@/lib/wikilink-transform"
-import { resolveRelatedSlug } from "@/lib/wiki-page-resolver"
+import { extractWikilinkTargets, transformImageEmbeds, transformWikilinks } from "@/lib/wikilink-transform"
+import { resolvePageTitle, resolveRelatedSlug } from "@/lib/wiki-page-resolver"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
 import { normalizePath } from "@/lib/path-utils"
 import { detectLanguage } from "@/lib/detect-language"
@@ -46,12 +46,42 @@ export function WikiReader({ body, sourceBody, sourceOffset = 0, filePath }: Wik
   const projectPathIndex = useWikiStore((s) => s.projectPathIndex)
   const openPathInPreview = useWikiStore((s) => s.openPathInPreview)
 
+  const projectPath = project ? normalizePath(project.path) : null
+  const wikiRoot = projectPath ? `${projectPath}/wiki` : null
+
+  // Resolve the display titles of linked wiki pages so wikilinks show
+  // the target page's title instead of its raw slug. Titles live in
+  // each target file's frontmatter, so we resolve targets to paths,
+  // read them, and cache the result per project+target.
+  const [linkedTitles, setLinkedTitles] = useState<ReadonlyMap<string, string>>(new Map())
+  useEffect(() => {
+    if (!wikiRoot) {
+      setLinkedTitles(new Map())
+      return
+    }
+    let cancelled = false
+    const targets = extractWikilinkTargets(body)
+    const resolved = new Map<string, string>()
+    Promise.all(
+      targets.map(async (target) => {
+        if (resolved.has(target)) return
+        const title = await resolvePageTitle(projectPathIndex, target, wikiRoot)
+        if (title) resolved.set(target, title)
+      }),
+    ).then(() => {
+      if (!cancelled) setLinkedTitles(new Map(resolved))
+    })
+    return () => { cancelled = true }
+  }, [body, projectPathIndex, wikiRoot])
+
   // Image embeds (`![[…]]`) must be rewritten BEFORE the generic
   // wikilink pass, otherwise the embed target gets mangled into a
   // `#fragment` link.
   const transformed = useMemo(
-    () => transformWikilinks(transformImageEmbeds(body)),
-    [body],
+    () => transformWikilinks(transformImageEmbeds(body), {
+      resolveTitle: (target) => linkedTitles.get(target),
+    }),
+    [body, linkedTitles],
   )
   const sourceLineStarts = useMemo(() => {
     if (sourceBody === undefined) return null
@@ -76,8 +106,6 @@ export function WikiReader({ body, sourceBody, sourceOffset = 0, filePath }: Wik
   const renderLanguage = detectLanguage(body)
   const direction = getTextDirection(renderLanguage)
   const htmlLang = getHtmlLang(renderLanguage)
-  const projectPath = project ? normalizePath(project.path) : null
-  const wikiRoot = projectPath ? `${projectPath}/wiki` : null
   // Directory of the file being rendered (project-absolute), so
   // relative image srcs resolve against it like Obsidian does.
   const currentFileDir = useMemo(() => {

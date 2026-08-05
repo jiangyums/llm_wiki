@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   FileText as FileTextIcon,
   FileSpreadsheet,
@@ -18,6 +18,7 @@ import { openUrl } from "@tauri-apps/plugin-opener"
 import type { FrontmatterValue } from "@/lib/frontmatter"
 import { getWikiTypeStyle } from "@/lib/wiki-type-style"
 import {
+  resolvePageTitle,
   resolveRelatedSlug,
   resolveSourceReference,
   type SourceReferenceResolution,
@@ -71,6 +72,31 @@ export function FrontmatterPanel({ data }: FrontmatterPanelProps) {
   const projectPath = project ? normalizePath(project.path) : null
   const wikiRoot = projectPath ? `${projectPath}/wiki` : null
   const sourcesRoot = projectPath ? `${projectPath}/raw/sources` : null
+
+  // Resolve the display titles of related pages so chips show the
+  // target page's title instead of its raw slug. Explicit aliases
+  // (`[[slug|alias]]`) are kept as-is.
+  const [relatedTitles, setRelatedTitles] = useState<ReadonlyMap<string, string>>(new Map())
+  useEffect(() => {
+    if (!wikiRoot || related.length === 0) {
+      setRelatedTitles(new Map())
+      return
+    }
+    let cancelled = false
+    const resolved = new Map<string, string>()
+    Promise.all(
+      related.map(async (entry) => {
+        const { slug, label } = unwrapWikilink(entry)
+        if (label !== slug) return // explicit alias — no title lookup
+        if (resolved.has(slug)) return
+        const title = await resolvePageTitle(projectPathIndex, slug, wikiRoot)
+        if (title) resolved.set(slug, title)
+      }),
+    ).then(() => {
+      if (!cancelled) setRelatedTitles(new Map(resolved))
+    })
+    return () => { cancelled = true }
+  }, [related, projectPathIndex, wikiRoot])
 
   const typeStyle = getWikiTypeStyle(type)
   const TypeIcon = typeStyle.icon
@@ -198,10 +224,11 @@ export function FrontmatterPanel({ data }: FrontmatterPanelProps) {
               const path = wikiRoot
                 ? resolveRelatedSlug(projectPathIndex, slug, wikiRoot)
                 : null
+              const title = label !== slug ? label : (relatedTitles.get(slug) ?? slug)
               return (
                 <RelatedChip
                   key={entry}
-                  slug={label}
+                  slug={title}
                   resolved={!!path}
                   onClick={() => handleNavigate(path)}
                 />

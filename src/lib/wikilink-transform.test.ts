@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { transformImageEmbeds, transformWikilinks } from "./wikilink-transform"
+import { extractWikilinkTargets, transformImageEmbeds, transformWikilinks } from "./wikilink-transform"
 
 describe("transformWikilinks", () => {
   it("returns input unchanged when there are no wikilinks", () => {
@@ -83,6 +83,51 @@ describe("transformWikilinks", () => {
   it("leaves dangling brackets untouched", () => {
     expect(transformWikilinks("[[broken")).toBe("[[broken")
     expect(transformWikilinks("broken]]")).toBe("broken]]")
+  })
+
+  it("uses resolveTitle for the label of a bare [[slug]] when provided", () => {
+    const resolveTitle = (target: string) =>
+      target === "accumulibacter" ? "Accumulibacter" : undefined
+    expect(transformWikilinks("see [[accumulibacter]] and [[nitrospira]]", { resolveTitle })).toBe(
+      "see [Accumulibacter](#accumulibacter) and [nitrospira](#nitrospira)",
+    )
+  })
+
+  it("keeps the explicit alias over the resolved title", () => {
+    const resolveTitle = () => "Resolved"
+    expect(transformWikilinks("[[foo|kept alias]]", { resolveTitle })).toBe(
+      "[kept alias](#foo)",
+    )
+  })
+
+  it("ignores empty resolved titles and falls back to the target", () => {
+    const resolveTitle = () => "  "
+    expect(transformWikilinks("[[foo]]", { resolveTitle })).toBe("[foo](#foo)")
+  })
+
+  it("passes the raw target (trimmed) to resolveTitle", () => {
+    const seen: string[] = []
+    transformWikilinks("[[ spaced ]]", { resolveTitle: (t) => { seen.push(t); return undefined } })
+    expect(seen).toEqual(["spaced"])
+  })
+})
+
+describe("extractWikilinkTargets", () => {
+  it("returns an empty array for text without wikilinks", () => {
+    expect(extractWikilinkTargets("plain text")).toEqual([])
+  })
+
+  it("collects unique targets, ignoring aliases", () => {
+    expect(extractWikilinkTargets("[[a]] [[b|alias]] [[a]]")).toEqual(["a", "b"])
+  })
+
+  it("skips wikilinks inside fenced code and inline code spans", () => {
+    const input = "[[keep]]\n```md\n[[skip]]\n```\n`[[skip2]]` [[keep2]]"
+    expect(extractWikilinkTargets(input)).toEqual(["keep", "keep2"])
+  })
+
+  it("skips image embeds", () => {
+    expect(extractWikilinkTargets("![[x.png]] [[page]]")).toEqual(["page"])
   })
 })
 

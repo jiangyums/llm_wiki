@@ -76,7 +76,18 @@ function replaceImageEmbeds(text: string): string {
   )
 }
 
-export function transformWikilinks(body: string): string {
+export interface WikilinkTransformOptions {
+  /**
+   * Optional resolver that maps a wikilink target to a display title
+   * (e.g. the linked page's frontmatter `title`). When present and
+   * the wikilink has no explicit alias, the resolved title is shown
+   * instead of the raw target slug. Returning undefined falls back
+   * to the target slug.
+   */
+  resolveTitle?: (target: string) => string | undefined
+}
+
+export function transformWikilinks(body: string, options?: WikilinkTransformOptions): string {
   if (!body.includes("[[")) return body
 
   // Split on triple-backtick fences. The capturing group keeps
@@ -84,27 +95,30 @@ export function transformWikilinks(body: string): string {
   // fence and must pass through untouched.
   const parts = body.split(/(```[\s\S]*?```)/g)
   return parts
-    .map((part, idx) => (idx % 2 === 1 ? part : transformOutsideCode(part)))
+    .map((part, idx) => (idx % 2 === 1 ? part : transformOutsideCode(part, options)))
     .join("")
 }
 
 const WIKILINK_RE = /\[\[([^\]|\n]+)(?:\|([^\]\n]*))?\]\]/g
 
-function transformOutsideCode(text: string): string {
+function transformOutsideCode(text: string, options?: WikilinkTransformOptions): string {
   if (!text.includes("[[")) return text
 
   // Split on inline-code spans so backticked content is preserved.
   const parts = text.split(/(`[^`\n]+`)/g)
   return parts
-    .map((part, idx) => (idx % 2 === 1 ? part : replaceWikilinks(part)))
+    .map((part, idx) => (idx % 2 === 1 ? part : replaceWikilinks(part, options)))
     .join("")
 }
 
-function replaceWikilinks(text: string): string {
+function replaceWikilinks(text: string, options?: WikilinkTransformOptions): string {
   return text.replace(WIKILINK_RE, (_match, rawTarget: string, rawAlias?: string) => {
     const target = rawTarget.trim()
     const alias = rawAlias?.trim() ?? ""
-    const label = alias.length > 0 ? alias : target
+    const resolvedTitle = options?.resolveTitle?.(target)
+    const label = alias.length > 0
+      ? alias
+      : (resolvedTitle && resolvedTitle.trim() ? resolvedTitle : target)
     // Encode the target so spaces / parens / hashes don't break the
     // markdown link parser. encodeURIComponent is overkill for a
     // fragment but it's the safe default.
@@ -114,4 +128,30 @@ function replaceWikilinks(text: string): string {
     const escapedLabel = label.replace(/\[/g, "\\[").replace(/\]/g, "\\]")
     return `[${escapedLabel}](${href})`
   })
+}
+
+/**
+ * Extract the unique wikilink targets in a markdown body, skipping
+ * fenced code blocks, inline code spans, and image embeds (`![[…]]`).
+ * Used to prefetch linked pages' titles for display.
+ */
+export function extractWikilinkTargets(body: string): string[] {
+  if (!body.includes("[[")) return []
+  const targets = new Set<string>()
+  const parts = body.split(/(```[\s\S]*?```)/g)
+  for (let idx = 0; idx < parts.length; idx++) {
+    if (idx % 2 === 1) continue
+    const segs = parts[idx].split(/(`[^`\n]+`)/g)
+    for (let j = 0; j < segs.length; j++) {
+      if (j % 2 === 1) continue
+      const re = /\[\[([^\]|\n]+)(?:\|[^\]\n]*)?\]\]/g
+      let m: RegExpExecArray | null
+      while ((m = re.exec(segs[j])) !== null) {
+        const prev = m.index > 0 ? segs[j][m.index - 1] : ""
+        if (prev === "!") continue // image embed — not a page link
+        targets.add(m[1].trim())
+      }
+    }
+  }
+  return [...targets]
 }
