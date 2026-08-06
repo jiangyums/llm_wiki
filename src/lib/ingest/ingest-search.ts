@@ -1,5 +1,6 @@
 import { searchWiki } from "@/lib/search"
-import { normalizePath } from "@/lib/path-utils"
+import { normalizePath, getRelativePath } from "@/lib/path-utils"
+import { sourceSummarySlugCandidatesFromIdentity } from "@/lib/source-identity"
 
 export interface ManifestPage {
   type: "entity" | "concept"
@@ -9,9 +10,9 @@ export interface ManifestPage {
 
 function typeFromPath(relativePath: string): string {
   const normalized = normalizePath(relativePath)
-  if (normalized.includes("/wiki/entities/")) return "entity"
-  if (normalized.includes("/wiki/concepts/")) return "concept"
-  if (normalized.includes("/wiki/sources/")) return "source"
+  if (/(^|\/)wiki\/entities\//.test(normalized)) return "entity"
+  if (/(^|\/)wiki\/concepts\//.test(normalized)) return "concept"
+  if (/(^|\/)wiki\/sources\//.test(normalized)) return "source"
   return "other"
 }
 
@@ -25,19 +26,17 @@ export async function searchRelatedWikiPages(
   const results = await searchWiki(projectPath, sourceContext)
   if (results.length === 0) return ""
 
+  const selfExclusionSlugs = new Set(sourceSummarySlugCandidatesFromIdentity(sourceIdentity))
   const pp = normalizePath(projectPath)
   const rows: string[] = []
 
   for (const result of results) {
-    const fullPath = normalizePath(result.path)
-    const relativePath = fullPath.startsWith(pp)
-      ? fullPath.slice(pp.length).replace(/^[/\\]+/, "")
-      : fullPath
+    const relativePath = getRelativePath(result.path, pp)
 
     if (relativePath.startsWith("wiki/sources/")) continue
 
     const slug = relativePath.replace(/^wiki\/[^/]+\//, "").replace(/\.md$/, "")
-    if (!slug || slug === sourceIdentity.replace(/\.md$/, "")) continue
+    if (!slug || selfExclusionSlugs.has(slug)) continue
 
     const title = result.title?.trim() || slug
     const type = typeFromPath(relativePath)
