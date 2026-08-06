@@ -2493,6 +2493,9 @@ mod tests {
 
     #[test]
     fn allow_absolute_write_paths() {
+        // `/tmp/...` is a POSIX absolute path. On Windows it is drive-root
+        // relative (not truly absolute), so only assert it on non-Windows.
+        #[cfg(not(windows))]
         assert!(require_absolute_path("write_file", "/tmp/project/wiki/sources/page.md").is_ok());
         assert!(require_absolute_path("write_file", "C:/project/wiki/sources/page.md").is_ok());
         assert!(require_absolute_path("write_file", r"C:\project\wiki\sources\page.md").is_ok());
@@ -2700,7 +2703,12 @@ mod tests {
 
     #[test]
     fn missing_link_page_handles_reserved_cjk_and_traversal_titles_without_overwrite() {
-        let root = make_temp_dir("missing-link-adversarial");
+        // Nest the project under a unique parent so the traversal-escape
+        // assertion targets a path this run fully controls (checking
+        // `%TEMP%` directly would be polluted by leftover files from any
+        // previous run).
+        let outer = make_temp_dir("missing-link-adversarial");
+        let root = outer.join("project");
         std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
         std::fs::write(root.join("wiki/concepts/Existing Page.md"), "user content").unwrap();
 
@@ -2720,8 +2728,8 @@ mod tests {
             std::fs::read_to_string(root.join("wiki/concepts/Existing Page.md")).unwrap(),
             "user content"
         );
-        assert!(!root.parent().unwrap().join("escape.md").exists());
-        let _ = std::fs::remove_dir_all(root);
+        assert!(!outer.join("escape.md").exists());
+        let _ = std::fs::remove_dir_all(outer);
     }
 
     #[test]

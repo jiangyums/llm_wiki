@@ -46,7 +46,16 @@ fn project_root_for(path: &Path) -> Option<PathBuf> {
 }
 
 fn history_path(root: &Path, path: &Path) -> PathBuf {
-    let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+    // Normalize separators so a record written against a non-canonical path
+    // (e.g. `root.join("wiki/page.md")`) is found by the read side that
+    // canonicalizes first. `std::fs::canonicalize` on Windows returns
+    // `\\?\` verbatim paths and rewrites `/` to `\`, which would otherwise
+    // yield a different FNV-1a key for the same physical file.
+    let relative = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
     // Fixed FNV-1a keeps history addresses stable across Rust/toolchain upgrades.
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in relative.as_bytes() {
