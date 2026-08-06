@@ -22,6 +22,7 @@ import {
 } from "@/lib/source-identity"
 import { parseFrontmatterArray, writeFrontmatterArray } from "@/lib/sources-merge"
 import { loadCache, sha256, markIngestCacheComplete, saveIngestCache, saveIngestStageProgress } from "@/lib/ingest-cache"
+import { writeStageLog } from "@/lib/ingest/ingest-logs"
 import {
   writeStageCache,
   readStageCache,
@@ -247,7 +248,7 @@ async function runAnalysis(params: AnalysisParams): Promise<AnalysisResult> {
     { role: "user", content: `Analyze this source document:\n\n**File:** ${sourceIdentity}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${sourceContext}` },
   ]
   let analysisReasoning = ""
-  try { await writeFile(`${pp}/wiki/ingest-step1-prompt.log`, JSON.stringify(analysisMessages, null, 2)) } catch {}
+  try { await writeStageLog(pp, 5, "prompt", JSON.stringify(analysisMessages, null, 2)) } catch {}
   await streamChat(
     llmConfig,
     analysisMessages,
@@ -262,12 +263,12 @@ async function runAnalysis(params: AnalysisParams): Promise<AnalysisResult> {
     signal,
     { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
   )
-  try { await writeFile(`${pp}/wiki/ingest-step1-reasoning.log`, analysisReasoning) } catch {}
+  try { await writeStageLog(pp, 5, "reasoning", analysisReasoning) } catch {}
 
   throwIfIngestAborted(signal, activityId)
 
   await logDiag(pp, `Stage analysis complete — analysis.length=${analysis?.length ?? 0}`)
-  try { await writeFile(`${pp}/wiki/ingest-step1.log`, analysis ?? "(empty)") } catch {}
+  try { await writeStageLog(pp, 5, "output", analysis ?? "(empty)") } catch {}
   if (!analysis?.trim()) {
     throw new IngestError("llm_output", `Analysis generation returned empty output for "${sourceIdentity}"`)
   }
@@ -352,7 +353,7 @@ async function runEntityPageGeneration(params: EntityPageParams): Promise<Entity
       ].join("\n"),
     },
   ]
-  try { await writeFile(`${pp}/wiki/ingest-step2a-entity-prompt.log`, JSON.stringify(entityMessages, null, 2)) } catch {}
+  try { await writeStageLog(pp, 6, "prompt", JSON.stringify(entityMessages, null, 2)) } catch {}
   let entityGeneration = ""
   let entityReasoning = ""
   let hadError = false
@@ -373,8 +374,8 @@ async function runEntityPageGeneration(params: EntityPageParams): Promise<Entity
     { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize) },
   )
   await logDiag(pp, `Stage entity generation — length=${entityGeneration.length}`)
-  try { await writeFile(`${pp}/wiki/ingest-step2a-entity.log`, entityGeneration) } catch {}
-  try { await writeFile(`${pp}/wiki/ingest-step2a-entity-reasoning.log`, entityReasoning) } catch {}
+  try { await writeStageLog(pp, 6, "output", entityGeneration) } catch {}
+  try { await writeStageLog(pp, 6, "reasoning", entityReasoning) } catch {}
 
   if (hadError) throw new IngestError(classifyLlmError(entityErr ?? new Error("unknown error")), `Entity page generation failed: ${entityErr?.message ?? "unknown error"}`, entityErr)
   if (!entityGeneration.trim()) {
@@ -475,7 +476,7 @@ async function runConceptPageGeneration(params: ConceptPageParams): Promise<Conc
     },
   ]
   let conceptReasoning = ""
-  try { await writeFile(`${pp}/wiki/ingest-step2a-concept-prompt.log`, JSON.stringify(conceptMessages, null, 2)) } catch {}
+  try { await writeStageLog(pp, 7, "prompt", JSON.stringify(conceptMessages, null, 2)) } catch {}
   let hadError = false
   let conceptErr: Error | undefined
   await streamChat(
@@ -494,8 +495,8 @@ async function runConceptPageGeneration(params: ConceptPageParams): Promise<Conc
     { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize) },
   )
   await logDiag(pp, `Stage concept generation — length=${conceptGeneration.length}`)
-  try { await writeFile(`${pp}/wiki/ingest-step2a-concept.log`, conceptGeneration) } catch {}
-  try { await writeFile(`${pp}/wiki/ingest-step2a-concept-reasoning.log`, conceptReasoning) } catch {}
+  try { await writeStageLog(pp, 7, "output", conceptGeneration) } catch {}
+  try { await writeStageLog(pp, 7, "reasoning", conceptReasoning) } catch {}
 
   if (hadError) throw new IngestError(classifyLlmError(conceptErr ?? new Error("unknown error")), `Concept page generation failed: ${conceptErr?.message ?? "unknown error"}`, conceptErr)
   if (!conceptGeneration.trim()) {
@@ -640,7 +641,7 @@ async function runSourceSummaryPageGeneration(params: SourceSummaryPageParams): 
       ].join("\n"),
     },
   ]
-  try { await writeFile(`${pp}/wiki/ingest-step2b-prompt.log`, JSON.stringify(summaryMessages, null, 2)) } catch {}
+  try { await writeStageLog(pp, 8, "prompt", JSON.stringify(summaryMessages, null, 2)) } catch {}
   let summaryReasoning = ""
   await streamChat(
     llmConfig,
@@ -658,8 +659,8 @@ async function runSourceSummaryPageGeneration(params: SourceSummaryPageParams): 
     { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize) },
   )
   await logDiag(pp, `Stage summary complete — generation.length=${summaryGeneration.length}`)
-  try { await writeFile(`${pp}/wiki/ingest-step2b.log`, summaryGeneration) } catch {}
-  try { await writeFile(`${pp}/wiki/ingest-step2b-reasoning.log`, summaryReasoning) } catch {}
+  try { await writeStageLog(pp, 8, "output", summaryGeneration) } catch {}
+  try { await writeStageLog(pp, 8, "reasoning", summaryReasoning) } catch {}
 
   if (!summaryGeneration.trim()) {
     throw new IngestError("llm_output", `Source summary generation returned empty output for "${sourceIdentity}"`)
@@ -672,7 +673,7 @@ async function runSourceSummaryPageGeneration(params: SourceSummaryPageParams): 
     throw new IngestError("llm_output",
       `Source summary page "${sourceSummaryPath}" was not generated — ` +
       `LLM output had ${summaryWriteResult.writtenPaths.length} block(s), expected 1. ` +
-      `Check ingest-step2b.log for the raw output.`
+      `Check .llm-wiki/ingest-logs/ingest-stage8-output.log for the raw output.`
     )
   }
   await appendIngestWarningLog(pp, sourceIdentity, summaryWriteResult.warnings)
@@ -764,7 +765,7 @@ async function runAggregatePageGeneration(params: AggregatePageParams): Promise<
     },
     { role: "user", content: "Generate the aggregate wiki files now. Start immediately with `---FILE:`." },
   ]
-  try { await writeFile(`${pp}/wiki/ingest-step3-prompt.log`, JSON.stringify(aggregateMessages, null, 2)) } catch {}
+  try { await writeStageLog(pp, 9, "prompt", JSON.stringify(aggregateMessages, null, 2)) } catch {}
   let aggregateReasoning = ""
   await streamChat(
     llmConfig,
@@ -781,8 +782,8 @@ async function runAggregatePageGeneration(params: AggregatePageParams): Promise<
     { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize) },
   )
   await logDiag(pp, `Stage aggregate complete — generation.length=${aggregateGeneration.length}`)
-  try { await writeFile(`${pp}/wiki/ingest-step3.log`, aggregateGeneration) } catch {}
-  try { await writeFile(`${pp}/wiki/ingest-step3-reasoning.log`, aggregateReasoning) } catch {}
+  try { await writeStageLog(pp, 9, "output", aggregateGeneration) } catch {}
+  try { await writeStageLog(pp, 9, "reasoning", aggregateReasoning) } catch {}
 
   if (!aggregateGeneration.trim()) {
     throw new IngestError("llm_output", `Aggregate (overview) generation returned empty output for "${sourceIdentity}"`)

@@ -1650,8 +1650,10 @@ fn file_stem(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     fn tmp_project() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2241,5 +2243,123 @@ mod tests {
         assert!(parse_embedding_batch_values(&response, 2)
             .unwrap_err()
             .contains("duplicate"));
+    }
+
+    // ── End-to-end halving proof over real TCP ────────────────────────
+    //
+    // The auto-halve retry loop lives in Rust (fetch_embedding_with_retry),
+    // so the old TypeScript "fake small-context server" tests can no longer
+    // exercise it. This replaces them: a tiny_http server on 127.0.0.1
+    // rejects inputs longer than a threshold with a llama.cpp-style error
+    // body, and we drive the real fetch_embedding_with_retry against it.
+
+    struct FakeEmbeddingServer {
+        url: String,
+        sizes: Arc<Mutex<Vec<usize>>>,
+        server: Option<Arc<tiny_http::Server>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeEmbeddingServer {
+        fn start(max_input_chars: usize, dim: usize) -> Self {
+            let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+            let addr = server.server_addr().to_ip().unwrap();
+            let url = format!("http://{addr}/v1/embeddings");
+            let sizes = Arc::new(Mutex::new(Vec::new()));
+            let sizes_thread = sizes.clone();
+            let server_thread = server.clone();
+            let handle = std::thread::spawn(move || {
+                for mut request in server_thread.incoming_requests() {
+                    let mut body = String::new();
+                    request.as_reader().read_to_string(&mut body).unwrap();
+                    let parsed: Value = serde_json::from_str(&body).unwrap();
+                    let input = parsed["input"].as_str().unwrap_or_default();
+                    sizes_thread.lock().unwrap().push(input.chars().count());
+                    if input.chars().count() > max_input_chars {
+                        let resp = format!(
+                            "{{\"error\":\"input length {} exceeds maximum context {}\"}}",
+                            input.chars().count(),
+                            max_input_chars
+                        );
+                        let response = tiny_http::Response::from_string(resp).with_status_code(400);
+                        let _ = request.respond(response);
+                    } else {
+                        let vec: Vec<f32> = (1..=dim).map(|i| (i as f32).sin() * 0.1).collect();
+                        let body = json!({ "data": [{ "embedding": vec }] }).to_string();
+                        let response = tiny_http::Response::from_string(body).with_status_code(200);
+                        let _ = request.respond(response);
+                    }
+                }
+            });
+            FakeEmbeddingServer {
+                url,
+                sizes,
+                server: Some(server),
+                handle: Some(handle),
+            }
+        }
+
+        fn request_sizes(&self) -> Vec<usize> {
+            self.sizes.lock().unwrap().clone()
+        }
+
+        fn config(&self) -> SearchEmbeddingConfig {
+            SearchEmbeddingConfig {
+                enabled: true,
+                endpoint: self.url.clone(),
+                api_key: String::new(),
+                model: "fake-embed".into(),
+                output_dimensionality: None,
+                extra_headers: None,
+            }
+        }
+    }
+
+    impl Drop for FakeEmbeddingServer {
+        fn drop(&mut self) {
+            if let Some(server) = self.server.take() {
+                server.unblock();
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_embedding_with_retry_halves_oversize_input_over_real_tcp() {
+        let server = FakeEmbeddingServer::start(200, 8);
+        let v = fetch_embedding_with_retry(&"a".repeat(800), &server.config(), 3)
+            .await
+            .unwrap();
+        assert_eq!(v.len(), 8);
+        assert_eq!(server.request_sizes(), vec![800, 400, 200]);
+    }
+
+    #[tokio::test]
+    async fn fetch_embedding_with_retry_reports_rejected_even_at_floor_after_exhausting_retries() {
+        // max 50 chars — below the 64-char halving floor, so the loop
+        // retries 2048 → 1024 → 512 → 256 (exhausting the 3-retry
+        // budget) and gives up with the specific oversize message.
+        let server = FakeEmbeddingServer::start(50, 8);
+        let err = fetch_embedding_with_retry(&"a".repeat(2048), &server.config(), 3)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Endpoint rejected input even at 256 chars"));
+        assert!(err.contains("Lower Settings -> Embedding -> Max Chunk Chars"));
+        assert_eq!(server.request_sizes(), vec![2048, 1024, 512, 256]);
+    }
+
+    #[tokio::test]
+    async fn fetch_embedding_with_retry_stops_halving_at_64_char_floor() {
+        // Server rejects everything over 0 chars, so every attempt fails.
+        // Input 128 → halve to 64 → 64 is NOT > 64 so the loop exits.
+        // Exactly 2 server hits.
+        let server = FakeEmbeddingServer::start(0, 8);
+        let err = fetch_embedding_with_retry(&"a".repeat(128), &server.config(), 3)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Endpoint rejected input even at 64 chars"));
+        assert_eq!(server.request_sizes(), vec![128, 64]);
     }
 }

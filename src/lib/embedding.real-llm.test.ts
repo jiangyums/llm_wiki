@@ -11,9 +11,11 @@
  *     actual phrasing a real server returns on oversize input (the
  *     mock tests use a synthetic body — a heuristic-miss regression
  *     would only show up here).
- *  4. The auto-halve loop actually recovers from real oversize
- *     responses end-to-end (plugin-http / fetch / body-parse edge
- *     cases, not just the retry arithmetic).
+ *
+ * NOTE: the end-to-end auto-halve loop now lives in Rust
+ * (`fetch_embedding_with_retry` in src-tauri/src/commands/search.rs),
+ * so the fake small-context-server proof moved there. This suite only
+ * exercises the TypeScript HTTP contract + the semantic contract.
  *
  * Gated behind `RUN_LLM_TESTS=1` AND an explicit `EMBEDDING_ENDPOINT`
  * env. We deliberately DON'T default to a known host — tests must
@@ -21,12 +23,10 @@
  * service) so the cost stays local.
  *
  * Tauri `invoke` is stubbed: LanceDB isn't reachable under Node, and
- * the Rust side has its own 15-test suite. We only exercise the
+ * the Rust side has its own test suite. We only exercise the
  * TypeScript HTTP layer + the semantic contract here.
  */
 import { describe, it, expect, vi, beforeAll } from "vitest"
-import { createServer, type Server } from "node:http"
-import type { AddressInfo } from "node:net"
 
 // A scriptable `invoke` stub so individual tests can (a) capture what
 // embedPage tries to write to LanceDB, and (b) swap in an in-memory
@@ -223,163 +223,6 @@ describe("real-embedding endpoint contract", () => {
     },
     TEST_TIMEOUT_MS,
   )
-})
-
-// ── Fake small-context HTTP server — guarantees the halving path ───
-//
-// The real embedding endpoint (qwen3-embedding-0.6b on LM Studio)
-// silently truncates multi-megabyte inputs, which means the halving
-// retry loop is NEVER exercised end-to-end against it. This block
-// spins up a tiny local HTTP server that rejects inputs longer than
-// a configured threshold with a llama.cpp-style error body, so we
-// can prove the full HTTP → parse → looksLikeOversizeError → halve
-// → retry → success cycle actually works over real TCP. Unlike the
-// mocked tests (which swap out getHttpFetch entirely), this exercises
-// the same plugin-http / globalThis.fetch code path production uses.
-
-interface FakeServerHandle {
-  url: string
-  requestCount: () => number
-  requestSizes: () => number[]
-  close: () => Promise<void>
-}
-
-/**
- * Starts a local HTTP server on 127.0.0.1 that behaves like an
- * OpenAI-compatible /v1/embeddings endpoint with a small context:
- *
- *   - input.length > maxInputChars → HTTP 400 with the error body
- *     `{"error":"input length N exceeds maximum context M"}` (matches
- *     the phrasing looksLikeOversizeError is designed to catch).
- *   - otherwise → HTTP 200 with a deterministic vector of the given
- *     dimension (value = sin(i) so it's not all-zeros).
- */
-async function startFakeEmbeddingServer(
-  maxInputChars: number,
-  dim = 8,
-): Promise<FakeServerHandle> {
-  let server: Server | null = null
-  const sizes: number[] = []
-  const url = await new Promise<string>((resolve, reject) => {
-    server = createServer((req, res) => {
-      const chunks: Buffer[] = []
-      req.on("data", (c: Buffer) => chunks.push(c))
-      req.on("end", () => {
-        try {
-          const body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as {
-            input: string
-          }
-          sizes.push(body.input.length)
-          if (body.input.length > maxInputChars) {
-            res.statusCode = 400
-            res.setHeader("Content-Type", "application/json")
-            res.end(
-              JSON.stringify({
-                error: `input length ${body.input.length} exceeds maximum context ${maxInputChars}`,
-              }),
-            )
-            return
-          }
-          const vec = Array.from({ length: dim }, (_, i) => Math.sin(i + 1) * 0.1)
-          res.statusCode = 200
-          res.setHeader("Content-Type", "application/json")
-          res.end(JSON.stringify({ data: [{ embedding: vec }] }))
-        } catch (err) {
-          res.statusCode = 500
-          res.end(String(err))
-        }
-      })
-    })
-    server.on("error", reject)
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server!.address() as AddressInfo
-      resolve(`http://127.0.0.1:${addr.port}/v1/embeddings`)
-    })
-  })
-  return {
-    url,
-    requestCount: () => sizes.length,
-    requestSizes: () => [...sizes],
-    close: () =>
-      new Promise<void>((resolve) => {
-        if (server) server.close(() => resolve())
-        else resolve()
-      }),
-  }
-}
-
-describe("fetchEmbedding against a fake small-context server (real TCP)", () => {
-  it("halves an oversize input and eventually succeeds", async () => {
-    const server = await startFakeEmbeddingServer(/* maxInputChars */ 200)
-    try {
-      const smallCfg = {
-        enabled: true,
-        endpoint: server.url,
-        apiKey: "",
-        model: "fake-embed",
-      }
-      // 800 chars of "a" → must halve 800 → 400 → 200 (3 attempts:
-      // first 2 rejected, third accepted at the boundary). Proves:
-      //   (a) looksLikeOversizeError matched the server's phrasing
-      //   (b) the request body is re-serialized cleanly on each retry
-      //   (c) the response parser correctly handles the error body
-      //       on rejects AND the success body on acceptance
-      const v = await fetchEmbedding("a".repeat(800), smallCfg)
-      expect(v, `halving failed: ${getLastEmbeddingError()}`).not.toBeNull()
-      expect(v!.length).toBe(8)
-      expect(getLastEmbeddingError()).toBeNull()
-      expect(server.requestSizes()).toEqual([800, 400, 200])
-    } finally {
-      await server.close()
-    }
-  })
-
-  it("surfaces the 'rejected input even at N chars' error when every halving round fails", async () => {
-    // max 50 chars — below the 64-char halving floor, so the
-    // halving loop will retry 2048 → 1024 → 512 → 256 (exhausting
-    // the 3-retry budget) and give up with the specific oversize
-    // error message, NOT the generic API-error message.
-    const server = await startFakeEmbeddingServer(/* maxInputChars */ 50)
-    try {
-      const smallCfg = {
-        enabled: true,
-        endpoint: server.url,
-        apiKey: "",
-        model: "fake-embed",
-      }
-      const v = await fetchEmbedding("a".repeat(2048), smallCfg)
-      expect(v).toBeNull()
-      expect(server.requestSizes()).toEqual([2048, 1024, 512, 256])
-
-      const err = getLastEmbeddingError()!
-      expect(err).toContain("Endpoint rejected input even at 256 chars")
-      expect(err).toContain("Lower Settings → Embedding → Max Chunk Chars")
-    } finally {
-      await server.close()
-    }
-  })
-
-  it("stops halving at the 64-char floor and reports the specific error (128 → 64, no further)", async () => {
-    // Server rejects everything over 0 chars, so every attempt fails.
-    // Input 128 → halve to 64 → 64 is NOT > 64 so loop exits. Exactly
-    // 2 server hits.
-    const server = await startFakeEmbeddingServer(/* maxInputChars */ 0)
-    try {
-      const smallCfg = {
-        enabled: true,
-        endpoint: server.url,
-        apiKey: "",
-        model: "fake-embed",
-      }
-      const v = await fetchEmbedding("a".repeat(128), smallCfg)
-      expect(v).toBeNull()
-      expect(server.requestSizes()).toEqual([128, 64])
-      const err = getLastEmbeddingError()!
-      expect(err).toContain("Endpoint rejected input even at 64 chars")
-    } finally {
-      await server.close()
-    }
-  })
 })
 
 // ── Multi-page RAG pipeline — real chunking + embedding + retrieval ──
